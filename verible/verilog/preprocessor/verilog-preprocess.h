@@ -35,6 +35,7 @@
 #ifndef VERIBLE_VERILOG_PREPROCESSOR_VERILOG_PREPROCESS_H_
 #define VERIBLE_VERILOG_PREPROCESSOR_VERILOG_PREPROCESS_H_
 
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -76,6 +77,11 @@ struct VerilogPreprocessData {
   verible::TokenStreamView preprocessed_token_stream;
   std::vector<TokenSequence> lexed_macros_backup;
 
+  // Storage for concatenated token strings (`` operator).
+  // These strings must persist for the lifetime of tokens that reference them.
+  // Using deque because it doesn't invalidate references when adding elements.
+  std::deque<std::string> concatenated_strings;
+
   // A backup memory that owns the content of the included files.
   std::vector<std::unique_ptr<verible::TextStructure>> included_text_structure;
 
@@ -110,7 +116,7 @@ class VerilogPreprocess {
     // want to emit all tokens.
     bool filter_branches = false;
 
-    // Inlude files with `include.
+    // Include files with `include.
     bool include_files = false;
 
     // Expand macro definition bodies, this will relexes the macro body.
@@ -120,6 +126,9 @@ class VerilogPreprocess {
 
   explicit VerilogPreprocess(const Config &config);
   VerilogPreprocess(const Config &config, FileOpener opener);
+  // Constructor for child preprocessors that share a parent's data.
+  VerilogPreprocess(const Config &config, FileOpener opener,
+                    VerilogPreprocessData &shared_data);
 
   // Initialize preprocessing with safe default options
   // TODO(hzeller): remove this constructor once all places using the
@@ -243,15 +252,22 @@ class VerilogPreprocess {
   // a toplevel branch that is selected.
   std::stack<BranchBlock> conditional_block_;
 
-  // Results of preprocessing
-  VerilogPreprocessData preprocess_data_;
+  // Data storage that this instance owns (used when not sharing).
+  VerilogPreprocessData owned_preprocess_data_;
 
-  // Defines and incdirs Information passed externally.
-  FileList::PreprocessingInfo preprocess_info_;
+  // Pointer to the preprocess data being used. Points to owned_preprocess_data_
+  // for top-level preprocessors, or to a parent's data for child preprocessors
+  // that share macro definitions and included file storage.
+  VerilogPreprocessData *preprocess_data_ = &owned_preprocess_data_;
 
   // A pointer to a file opener function.
   // This is needed for opening new files while handling includes.
   const FileOpener file_opener_ = nullptr;
+
+  // Pointer to defines and incdirs information passed externally.
+  // This is a pointer (not a copy) so that child preprocessors can share
+  // the same PreprocessingInfo without creating dangling string_views.
+  const FileList::PreprocessingInfo *preprocess_info_ = nullptr;
 };
 
 }  // namespace verilog

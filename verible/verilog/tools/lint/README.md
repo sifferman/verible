@@ -7,7 +7,9 @@ freshness: { owner: 'hzeller' reviewed: '2021-09-23' }
 The `verible-verilog-lint` SV style linter analyzes code for patterns and
 constructs that are deemed undesirable according to the implemented lint rules.
 Ideally, each lint rule should reference a passage from an authoritative style
-guide. The style linter operates on *single unpreprocessed files* in isolation.
+guide. By default, the style linter operates on *single unpreprocessed files*
+in isolation, but can optionally process includes and defines via command-line
+arguments.
 
 For automatic code-reviews on github, there is a [easy to integrate github
 action available][github-lint-action].
@@ -18,18 +20,20 @@ The style linter excels at:
     token matching rules.
     *   Expressing rules with syntactic context-sensitivity.
 
-Consequences of reading unpreprocessed input:
+Consequences of reading unpreprocessed input (default mode):
 
 *   Can examine comments.
 *   Good at examining uses of _unexpanded_ macros.
 
-Currrent limitations:
+With preprocessing enabled (using `+incdir+` and `+define+` arguments):
 
-*   No attempt to understand preprocessing conditional branches.
-*   No semantic analysis (such as connectivity). This requires:
-    *   preprocessing
-    *   multi-file analysis
-    *   abstract syntax tree
+*   Can resolve `` `include `` directives and process included files.
+*   Can expand macro definitions and usages.
+*   Can filter preprocessor conditional branches (`` `ifdef ``, `` `ifndef ``, etc.).
+
+Current limitations:
+
+*   No semantic analysis (such as connectivity).
 
 ## Developers
 
@@ -91,6 +95,36 @@ usage: verible-verilog-lint [options] <file> [<file>...]
 
 We recommend each project maintain its own configuration file for convenience
 and consistency among project members.
+
+## Preprocessing Support
+
+The linter supports preprocessing directives via command-line arguments similar
+to common Verilog simulators:
+
+*   `+incdir+<directory>` - Add directory to the include search path. Can be
+    specified multiple times.
+*   `+define+<name>=<value>` or `+define+<name>` - Define a macro. Can be
+    specified multiple times.
+
+When any preprocessing arguments are provided, the linter enables full
+preprocessing mode which:
+
+*   Resolves `` `include`` directives and processes included files
+*   Expands macro definitions (`` `define``) and usages
+*   Filters preprocessor conditional branches (`` `ifdef``, `` `ifndef``,
+    `` `elsif``, `` `else``, `` `endif``)
+
+Example usage:
+
+```bash
+# Lint with include directories and defines
+verible-verilog-lint +incdir+./includes +incdir+./common \
+    +define+SYNTHESIS +define+WIDTH=32 mydesign.sv
+
+# Multiple files with shared preprocessing settings
+verible-verilog-lint +incdir+./rtl/include \
+    file1.sv file2.sv file3.sv
+```
 
 ## Diagnostics
 

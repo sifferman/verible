@@ -52,8 +52,10 @@
 #include "verible/verilog/analysis/default-rules.h"
 #include "verible/verilog/analysis/lint-rule-registry.h"
 #include "verible/verilog/analysis/verilog-analyzer.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 #include "verible/verilog/analysis/verilog-linter-constants.h"
+#include "verible/verilog/analysis/verilog-project.h"
 #include "verible/verilog/parser/verilog-token-classifications.h"
 #include "verible/verilog/parser/verilog-token-enum.h"
 
@@ -104,7 +106,8 @@ std::set<LintViolationWithStatus> GetSortedViolations(
 int LintOneFile(std::ostream *stream, std::string_view filename,
                 const LinterConfiguration &config,
                 verible::ViolationHandler *violation_handler, bool check_syntax,
-                bool parse_fatal, bool lint_fatal, bool show_context) {
+                bool parse_fatal, bool lint_fatal, bool show_context,
+                const FileList::PreprocessingInfo *preprocessing_info) {
   const absl::StatusOr<std::string> content_or =
       verible::file::GetContentAsString(filename);
   if (!content_or.ok()) {
@@ -113,15 +116,53 @@ int LintOneFile(std::ostream *stream, std::string_view filename,
     return 2;
   }
 
-  // Lex and parse the contents of the file.
-  // Attempt first to run without preprocessing to capture more information,
-  // but if that results in parse issues, filter out preprocessing branches
-  // as that is often the reason.
-  // TODO(hzeller): this behavior could be configurable, but then again this
-  //   is something the user is expecting to work as best as possible (which
-  //   is also why we use automatic mode).
-  const auto analyzer = VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
-      *content_or, filename);
+  // Create analyzer with appropriate preprocessing configuration.
+  // IMPORTANT: project must be declared before analyzer to ensure it outlives
+  // the analyzer (destruction happens in reverse order of declaration).
+  std::unique_ptr<VerilogProject> project;
+  std::unique_ptr<VerilogAnalyzer> analyzer;
+
+  if (preprocessing_info &&
+      (!preprocessing_info->include_dirs.empty() ||
+       !preprocessing_info->defines.empty())) {
+    // Full preprocessing with include file support.
+    VerilogPreprocess::Config preprocess_config;
+    preprocess_config.filter_branches = true;
+    preprocess_config.include_files = true;
+    preprocess_config.expand_macros = true;
+
+    // Create VerilogProject for resolving include paths.
+    project = std::make_unique<VerilogProject>(
+        ".", preprocessing_info->include_dirs);
+
+    // Create FileOpener callback that captures project pointer.
+    VerilogPreprocess::FileOpener file_opener =
+        [project_ptr = project.get()](
+            std::string_view included_filename)
+            -> absl::StatusOr<std::string_view> {
+      auto result = project_ptr->OpenIncludedFile(included_filename);
+      if (!result.status().ok()) return result.status();
+      return (*result)->GetContent();
+    };
+
+    // Create analyzer with preprocessing config.
+    analyzer = std::make_unique<VerilogAnalyzer>(
+        *content_or, filename, preprocess_config);
+
+    // Configure preprocessing information before analysis.
+    analyzer->SetPreprocessing(preprocessing_info, std::move(file_opener));
+
+    // Analyze (handles tokenization, preprocessing, and parsing).
+    if (const auto status = analyzer->Analyze(); !status.ok()) {
+      LOG(ERROR) << "Analysis failed: " << status.message();
+      return 2;
+    }
+  } else {
+    // Default behavior: attempt without preprocessing, fall back if needed.
+    analyzer = VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
+        *content_or, filename);
+  }
+
   if (check_syntax) {
     const auto lex_status = ABSL_DIE_IF_NULL(analyzer)->LexStatus();
     const auto parse_status = analyzer->ParseStatus();

@@ -24,6 +24,7 @@
 #include "verible/common/analysis/file-analyzer.h"
 #include "verible/common/strings/mem-block.h"
 #include "verible/common/text/token-stream-view.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/preprocessor/verilog-preprocess.h"
 
 namespace verilog {
@@ -50,6 +51,20 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
 
   VerilogAnalyzer(const VerilogAnalyzer &) = delete;
   VerilogAnalyzer(VerilogAnalyzer &&) = delete;
+
+  // Destructor: clear syntax tree if preprocessing was used with includes,
+  // because the tree may contain tokens from included files which would fail
+  // TextStructure's internal consistency check.
+  ~VerilogAnalyzer() override;
+
+  // Sets the preprocessing information (include directories and defines)
+  // and FileOpener callback to enable full preprocessing with includes.
+  // Must be called before Analyze().
+  void SetPreprocessing(const FileList::PreprocessingInfo *preprocessing_info,
+                        VerilogPreprocess::FileOpener file_opener) {
+    preprocessing_info_ = preprocessing_info;
+    file_opener_ = std::move(file_opener);
+  }
 
   // Lex-es the input text into tokens.
   absl::Status Tokenize() final;
@@ -125,6 +140,15 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
   // Preprocessor.
   const VerilogPreprocess::Config preprocess_config_;
   VerilogPreprocessData preprocessor_data_;
+
+  // Preprocessing information for include dirs and defines (optional).
+  const FileList::PreprocessingInfo *preprocessing_info_ = nullptr;
+
+  // FileOpener callback for opening included files (optional).
+  VerilogPreprocess::FileOpener file_opener_;
+
+  // Filtered preprocessed stream (used when includes are present).
+  verible::TokenStreamView filtered_preprocessed_stream_;
 
   // Status of lexing.
   absl::Status lex_status_;

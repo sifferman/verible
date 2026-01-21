@@ -33,6 +33,7 @@
 #include "verible/common/strings/line-column-map.h"
 #include "verible/common/text/text-structure.h"
 #include "verible/verilog/analysis/lint-rule-registry.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 
 // Flag is declared for testing purposes (used e.g. in
@@ -57,6 +58,8 @@ std::set<verible::LintViolationWithStatus> GetSortedViolations(
 // If 'parse_fatal' is true, abort after encountering syntax errors, else
 // continue to analyze the salvaged code structure.
 // If 'lint_fatal' is true, exit nonzero on finding lint violations.
+// 'preprocessing_info' (optional) provides include directories and defines for
+// the preprocessor.
 // Returns an exit_code like status where 0 means success, 1 means some
 // errors were found (syntax, lint), and anything else is a fatal error.
 //
@@ -66,7 +69,8 @@ std::set<verible::LintViolationWithStatus> GetSortedViolations(
 int LintOneFile(std::ostream *stream, std::string_view filename,
                 const LinterConfiguration &config,
                 verible::ViolationHandler *violation_handler, bool check_syntax,
-                bool parse_fatal, bool lint_fatal, bool show_context = false);
+                bool parse_fatal, bool lint_fatal, bool show_context = false,
+                const FileList::PreprocessingInfo *preprocessing_info = nullptr);
 
 // VerilogLinter analyzes a TextStructureView of Verilog source code.
 // This uses syntax-tree based analyses and lexical token-stream analyses.

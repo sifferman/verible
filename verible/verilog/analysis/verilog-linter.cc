@@ -54,8 +54,10 @@
 #include "verible/verilog/analysis/verilog-analyzer.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 #include "verible/verilog/analysis/verilog-linter-constants.h"
+#include "verible/verilog/analysis/verilog-project.h"
 #include "verible/verilog/parser/verilog-token-classifications.h"
 #include "verible/verilog/parser/verilog-token-enum.h"
+#include "verible/verilog/preprocessor/verilog-preprocess.h"
 
 // TODO(hzeller): make --rules repeatable and cumulative
 
@@ -101,6 +103,63 @@ std::set<LintViolationWithStatus> GetSortedViolations(
 //  0: success
 //  1: linting error (if options.parse_fatal == true)
 //  2..: other fatal issues such as file not found.
+// Whether 'preprocessing_info' asks for anything that requires running the
+// full preprocessor.
+static bool NeedsFullPreprocessing(
+    const FileList::PreprocessingInfo *preprocessing_info) {
+  return preprocessing_info != nullptr &&
+         (!preprocessing_info->include_dirs.empty() ||
+          !preprocessing_info->defines.empty());
+}
+
+// One analyzed file, together with the project that resolves the `include
+// paths of that file. 'include_project' is declared first so that it outlives
+// 'analyzer', whose file opener refers to it.
+struct AnalyzedFile {
+  std::unique_ptr<VerilogProject> include_project;
+  std::unique_ptr<VerilogAnalyzer> analyzer;
+};
+
+// Lexes and parses 'content'.
+// With include directories or defines to honor, the file is fully
+// preprocessed: `include directives are resolved and macros expanded.
+// Otherwise preprocessing is attempted first without filtering, to capture as
+// much information as possible, falling back to filtering out preprocessing
+// branches when that yields parse issues, as that is often the reason.
+// TODO(hzeller): this fallback behavior could be configurable, but then again
+//   this is something the user is expecting to work as best as possible (which
+//   is also why we use automatic mode).
+static AnalyzedFile AnalyzeOneFile(std::string_view content,
+                                   std::string_view filename,
+                                   const LintOneFileOptions &options) {
+  if (!NeedsFullPreprocessing(options.preprocessing_info)) {
+    return {nullptr, VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
+                         content, filename)};
+  }
+
+  AnalyzedFile result;
+  result.include_project = std::make_unique<VerilogProject>(
+      options.include_root, options.preprocessing_info->include_dirs);
+  VerilogPreprocess::FileOpener file_opener =
+      [project = result.include_project.get()](
+          std::string_view included_file) -> absl::StatusOr<std::string_view> {
+    const auto opened = project->OpenIncludedFile(included_file);
+    if (!opened.ok()) return opened.status();
+    return (*opened)->GetContent();
+  };
+
+  const VerilogPreprocess::Config preprocess_config{
+      .filter_branches = true, .include_files = true, .expand_macros = true};
+  result.analyzer =
+      std::make_unique<VerilogAnalyzer>(content, filename, preprocess_config);
+  result.analyzer->SetPreprocessing(options.preprocessing_info,
+                                    std::move(file_opener));
+  // Errors are reported through the analyzer's lex and parse status, which the
+  // caller renders the same way for both analysis modes.
+  result.analyzer->Analyze().IgnoreError();
+  return result;
+}
+
 int LintOneFile(std::ostream *stream, std::string_view filename,
                 const LinterConfiguration &config,
                 verible::ViolationHandler *violation_handler,
@@ -113,15 +172,8 @@ int LintOneFile(std::ostream *stream, std::string_view filename,
     return 2;
   }
 
-  // Lex and parse the contents of the file.
-  // Attempt first to run without preprocessing to capture more information,
-  // but if that results in parse issues, filter out preprocessing branches
-  // as that is often the reason.
-  // TODO(hzeller): this behavior could be configurable, but then again this
-  //   is something the user is expecting to work as best as possible (which
-  //   is also why we use automatic mode).
-  const auto analyzer = VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
-      *content_or, filename);
+  const AnalyzedFile analyzed = AnalyzeOneFile(*content_or, filename, options);
+  const auto &analyzer = analyzed.analyzer;
   if (options.check_syntax) {
     const auto lex_status = ABSL_DIE_IF_NULL(analyzer)->LexStatus();
     const auto parse_status = analyzer->ParseStatus();

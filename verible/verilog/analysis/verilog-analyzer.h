@@ -24,6 +24,7 @@
 #include "verible/common/analysis/file-analyzer.h"
 #include "verible/common/strings/mem-block.h"
 #include "verible/common/text/token-stream-view.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/preprocessor/verilog-preprocess.h"
 
 namespace verilog {
@@ -50,6 +51,16 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
 
   VerilogAnalyzer(const VerilogAnalyzer &) = delete;
   VerilogAnalyzer(VerilogAnalyzer &&) = delete;
+
+  // Enables full preprocessing: `include resolution using 'file_opener', and
+  // the command-line defines and include directories in '*preprocessing_info'.
+  // '*preprocessing_info' must outlive this object. Must be called before
+  // Analyze().
+  void SetPreprocessing(const FileList::PreprocessingInfo *preprocessing_info,
+                        VerilogPreprocess::FileOpener file_opener) {
+    preprocessing_info_ = preprocessing_info;
+    file_opener_ = std::move(file_opener);
+  }
 
   // Lex-es the input text into tokens.
   absl::Status Tokenize() final;
@@ -125,6 +136,22 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
   // Preprocessor.
   const VerilogPreprocess::Config preprocess_config_;
   VerilogPreprocessData preprocessor_data_;
+
+  // Include directories and defines for the preprocessor, or nullptr to
+  // preprocess without them. Not owned; see SetPreprocessing().
+  const FileList::PreprocessingInfo *preprocessing_info_ = nullptr;
+
+  // Opens the files named by `include directives, or empty to leave `include
+  // unresolved. See SetPreprocessing().
+  VerilogPreprocess::FileOpener file_opener_;
+
+  // The parser's token stream when preprocessing `include's produced tokens
+  // from more than one file, which therefore cannot live in TextStructure's
+  // own single-file token stream view. Empty otherwise.
+  verible::TokenStreamView multi_file_token_stream_;
+
+  // Returns the token stream to hand to the parser.
+  const verible::TokenStreamView &TokenStreamToParse();
 
   // Status of lexing.
   absl::Status lex_status_;

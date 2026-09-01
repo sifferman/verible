@@ -13,9 +13,10 @@
 // limitations under the License.
 
 // VerilogPreprocess is a *pseudo*-preprocessor for Verilog.
-// Unlike a conventional preprocessor, this pseudo-preprocessor does not open
-// included files, nor does it evaluate preprocessor expressions.
-// Instead, it does a best-effort handling of preprocessor directives
+// Unlike a conventional preprocessor, this pseudo-preprocessor does not
+// evaluate preprocessor expressions, and it opens included files only when
+// Config::include_files is set and a FileOpener is supplied.
+// Otherwise it does a best-effort handling of preprocessor directives
 // locally within one file, and no additional context.
 // For example, it may expand a macro call if its definition happens to be
 // available, but it is not required to do so.
@@ -82,8 +83,18 @@ struct VerilogPreprocessData {
   // Using deque because it doesn't invalidate references when adding elements.
   std::deque<std::string> concatenated_strings;
 
-  // A backup memory that owns the content of the included files.
-  std::vector<std::unique_ptr<verible::TextStructure>> included_text_structure;
+  // A file pulled in by `include.
+  struct IncludedFile {
+    // Path of the file as it was resolved by the FileOpener, for diagnostics.
+    std::string path;
+
+    // Owns the text of the included file. The preprocessed token stream, and
+    // any syntax tree built from it, point into this text.
+    std::unique_ptr<verible::TextStructure> text;
+  };
+
+  // The files pulled in by `include, in the order they were opened.
+  std::vector<IncludedFile> included_files;
 
   // Map of defined macros.
   MacroDefinitionRegistry macro_definitions;
@@ -116,7 +127,7 @@ class VerilogPreprocess {
     // want to emit all tokens.
     bool filter_branches = false;
 
-    // Inlude files with `include.
+    // Include files with `include.
     bool include_files = false;
 
     // Expand macro definition bodies, this will relexes the macro body.
@@ -130,7 +141,7 @@ class VerilogPreprocess {
   // Initialize preprocessing with safe default options
   // TODO(hzeller): remove this constructor once all places using the
   // preprocessor have been updated to pass a config.
-  VerilogPreprocess() : VerilogPreprocess(Config()) {};
+  VerilogPreprocess() : VerilogPreprocess(Config()){};
 
   // ScanStream reads in a stream of tokens returns the result as a move
   // of preprocessor_data_.  preprocessor_data_ should not be accessed
@@ -141,12 +152,40 @@ class VerilogPreprocess {
   // TODO(b/111544845): ExpandEvalStringLiteral
 
   // Sets the preprocessing information containing defines and incdirs.
+  // 'preprocess_info' is retained by reference and must outlive this object
+  // and every token this object produces: the command-line defines it holds
+  // back the string_views of the macro definitions registered here.
   void setPreprocessingInfo(
       const verilog::FileList::PreprocessingInfo &preprocess_info);
 
  private:
   using StreamIteratorGenerator =
       std::function<TokenStreamView::const_iterator()>;
+
+  // Constructs the preprocessor for a file pulled in by `include.
+  // Results accumulate into '*shared_data', which belongs to the preprocessor
+  // of the including file, so that macros defined by the included file are
+  // visible afterwards to the file that included it. Both '*shared_data' and
+  // '*preprocess_info' must outlive this object; 'preprocess_info' may be
+  // nullptr.
+  VerilogPreprocess(const Config &config, FileOpener opener,
+                    VerilogPreprocessData *shared_data,
+                    const FileList::PreprocessingInfo *preprocess_info);
+
+  // Preprocesses the tokens of an included file, accumulating the results into
+  // the shared data rather than returning them. Reports whether the included
+  // file preprocessed without error.
+  absl::Status ScanIncludedStream(const TokenStreamView &token_stream);
+
+  // Consumes 'token_stream', accumulating results into *preprocess_data_.
+  // Shared implementation of ScanStream() and ScanIncludedStream().
+  void ScanStreamAccumulating(const TokenStreamView &token_stream);
+
+  // True in a preprocessor constructed for an included file, i.e. one whose
+  // results accumulate into the including file's data.
+  bool IsPreprocessingIncludedFile() const {
+    return preprocess_data_ != &owned_preprocess_data_;
+  }
 
   // Extract macro name after `define, `ifdef, `elsif ... and returns
   // iterator of macro name or a failure status.
@@ -249,11 +288,21 @@ class VerilogPreprocess {
   // a toplevel branch that is selected.
   std::stack<BranchBlock> conditional_block_;
 
-  // Results of preprocessing
-  VerilogPreprocessData preprocess_data_;
+  // Results of preprocessing owned by this object. Empty and unused in a
+  // preprocessor constructed for an included file, which accumulates into the
+  // including file's results instead; see preprocess_data_.
+  VerilogPreprocessData owned_preprocess_data_;
 
-  // Defines and incdirs Information passed externally.
-  FileList::PreprocessingInfo preprocess_info_;
+  // Where results accumulate. This is &owned_preprocess_data_ for the
+  // preprocessor of a top-level file, and the including file's results for the
+  // preprocessor of an included file. Sharing rather than merging is what makes
+  // a macro defined in an included file visible to the file that included it.
+  VerilogPreprocessData *const preprocess_data_ = &owned_preprocess_data_;
+
+  // Defines and incdirs information passed externally, or nullptr if none was
+  // supplied. Held by pointer rather than by value so that the string_views of
+  // the caller's defines stay valid; see setPreprocessingInfo().
+  const FileList::PreprocessingInfo *preprocess_info_ = nullptr;
 
   // A pointer to a file opener function.
   // This is needed for opening new files while handling includes.

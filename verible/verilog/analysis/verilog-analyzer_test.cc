@@ -14,6 +14,7 @@
 
 #include "verible/verilog/analysis/verilog-analyzer.h"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -37,7 +38,9 @@
 #include "verible/common/util/casts.h"
 #include "verible/common/util/logging.h"
 #include "verible/verilog/analysis/verilog-excerpt-parse.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/parser/verilog-token-enum.h"
+#include "verible/verilog/preprocessor/verilog-preprocess.h"
 
 #undef EXPECT_OK
 #define EXPECT_OK(value) EXPECT_TRUE((value).ok())
@@ -915,6 +918,113 @@ TEST_F(VerilogAnalyzerInternalsTest, ScanParsingModeDirective) {
     EXPECT_EQ(mode, test.second) << " mismatched mode with input:\n"
                                  << test.first;
   }
+}
+
+// Preprocessing configuration that resolves `include and expands macros.
+static const VerilogPreprocess::Config kFullPreprocess{
+    .filter_branches = true, .include_files = true, .expand_macros = true};
+
+// Serves a fixed set of in-memory files, so `include tests need no filesystem.
+static VerilogPreprocess::FileOpener InMemoryFileOpener(
+    const std::map<std::string, std::string> *files) {
+  return
+      [files](std::string_view filename) -> absl::StatusOr<std::string_view> {
+        const auto found = files->find(std::string(filename));
+        if (found == files->end()) {
+          return absl::NotFoundError(absl::StrCat(filename, " not found"));
+        }
+        return std::string_view(found->second);
+      };
+}
+
+// A file whose `include supplies part of the design must parse, and the
+// resulting analyzer must destruct cleanly: TextStructure runs a consistency
+// check over the syntax tree in its destructor, and that check has to accept a
+// tree whose leaves point into the text of the included files.
+TEST(VerilogAnalyzerTest, ParsesDesignSpanningIncludedFile) {
+  const std::map<std::string, std::string> files = {
+      {"body.svh", "module included_module();\nendmodule\n"}};
+  const verilog::FileList::PreprocessingInfo preprocessing_info;
+
+  VerilogAnalyzer analyzer("`include \"body.svh\"\nmodule top(); endmodule\n",
+                           "top.sv", kFullPreprocess);
+  analyzer.SetPreprocessing(&preprocessing_info, InMemoryFileOpener(&files));
+
+  EXPECT_OK(analyzer.Analyze());
+  ASSERT_NE(analyzer.Data().SyntaxTree(), nullptr);
+
+  // Both modules are present in the one tree, so the tree really does span the
+  // two files rather than the includer alone.
+  const std::string_view tree_text =
+      verible::StringSpanOfSymbol(*analyzer.Data().SyntaxTree());
+  EXPECT_FALSE(tree_text.empty());
+}
+
+// A macro defined in an included file must be usable by the including file,
+// end to end through the analyzer.
+TEST(VerilogAnalyzerTest, ExpandsMacroDefinedInIncludedFile) {
+  const std::map<std::string, std::string> files = {
+      {"defs.svh", "`define WIDTH 8\n"}};
+  const verilog::FileList::PreprocessingInfo preprocessing_info;
+
+  VerilogAnalyzer analyzer(
+      "`include \"defs.svh\"\nmodule m; wire [`WIDTH-1:0] w; endmodule\n",
+      "top.sv", kFullPreprocess);
+  analyzer.SetPreprocessing(&preprocessing_info, InMemoryFileOpener(&files));
+
+  EXPECT_OK(analyzer.Analyze());
+  EXPECT_NE(analyzer.Data().SyntaxTree(), nullptr);
+}
+
+// A token that came from an included file resolves to a position in that file,
+// not to a bogus offset in the including file.
+TEST(VerilogAnalyzerTest, ReportsPositionsWithinTheIncludedFile) {
+  // The included module starts on the third line of its own file, but on the
+  // first line of the preprocessed stream, so the two disagree.
+  const std::map<std::string, std::string> files = {
+      {"body.svh", "\n\nmodule included_module();\nendmodule\n"}};
+  const verilog::FileList::PreprocessingInfo preprocessing_info;
+
+  VerilogAnalyzer analyzer("`include \"body.svh\"\nmodule top(); endmodule\n",
+                           "top.sv", kFullPreprocess);
+  analyzer.SetPreprocessing(&preprocessing_info, InMemoryFileOpener(&files));
+  EXPECT_OK(analyzer.Analyze());
+  ASSERT_NE(analyzer.Data().SyntaxTree(), nullptr);
+
+  // The include comes first, so the tree starts in the included file.
+  const verible::SyntaxTreeLeaf *leftmost =
+      verible::GetLeftmostLeaf(*analyzer.Data().SyntaxTree());
+  ASSERT_NE(leftmost, nullptr);
+  const std::string_view leftmost_text = leftmost->get().text();
+
+  const auto &data = analyzer.Data();
+  EXPECT_TRUE(data.ContainsText(leftmost_text))
+      << "text of an included file must be recognized as part of this "
+         "structure";
+
+  const auto source_file = data.FindSourceFileContaining(leftmost_text);
+  ASSERT_FALSE(source_file.empty());
+  EXPECT_EQ(source_file.filename, "body.svh");
+
+  // Resolved against body.svh this is line 2 (0-based); resolved against the
+  // including file it would be line 0.
+  const auto range = data.GetRangeForToken(leftmost->get());
+  EXPECT_EQ(range.start.line, 2);
+}
+
+// Preprocessing without `include's must be unaffected: the analyzer keeps
+// using TextStructure's own token stream view.
+TEST(VerilogAnalyzerTest, ParsesWithoutIncludesWhenPreprocessingEnabled) {
+  const std::map<std::string, std::string> files = {};
+  const verilog::FileList::PreprocessingInfo preprocessing_info;
+
+  VerilogAnalyzer analyzer("module top(); endmodule\n", "top.sv",
+                           kFullPreprocess);
+  analyzer.SetPreprocessing(&preprocessing_info, InMemoryFileOpener(&files));
+
+  EXPECT_OK(analyzer.Analyze());
+  EXPECT_NE(analyzer.Data().SyntaxTree(), nullptr);
+  EXPECT_FALSE(analyzer.Data().GetTokenStreamView().empty());
 }
 
 }  // namespace

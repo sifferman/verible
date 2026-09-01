@@ -1387,5 +1387,174 @@ endmodule)",
       << "Expected 'data_bus', got: " << combined;
 }
 
+// Builds a FileOpener serving a fixed set of in-memory files, so that `include
+// tests need no filesystem.
+static VerilogPreprocess::FileOpener InMemoryFileOpener(
+    const std::map<std::string, std::string> *files) {
+  return
+      [files](std::string_view filename) -> absl::StatusOr<std::string_view> {
+        const auto found = files->find(std::string(filename));
+        if (found == files->end()) {
+          return absl::NotFoundError(absl::StrCat(filename, " is not found"));
+        }
+        return std::string_view(found->second);
+      };
+}
+
+// A macro defined by an included file must be usable by the file that included
+// it; that is the whole point of sharing preprocessing results with the
+// preprocessor of the included file.
+TEST(VerilogPreprocessTest, MacroDefinedInIncludedFileIsVisibleToIncluder) {
+  const std::map<std::string, std::string> files = {
+      {"defs.svh", "`define WIDTH 8\n"}};
+  VerilogPreprocess preprocessor(
+      VerilogPreprocess::Config({.filter_branches = true,
+                                 .include_files = true,
+                                 .expand_macros = true}),
+      InMemoryFileOpener(&files));
+
+  LexerTester lexer("`include \"defs.svh\"\nwire [`WIDTH-1:0] w;\n");
+  const auto pp_data = preprocessor.ScanStream(lexer.GetTokenStreamView());
+
+  EXPECT_TRUE(pp_data.errors.empty()) << pp_data.errors.front().error_message;
+  EXPECT_THAT(pp_data.macro_definitions,
+              testing::Contains(testing::Key("WIDTH")));
+
+  std::string combined;
+  for (const auto &token : pp_data.preprocessed_token_stream) {
+    combined += std::string(token->text());
+  }
+  EXPECT_TRUE(absl::StrContains(combined, "8"))
+      << "`WIDTH should have expanded to 8, got: " << combined;
+}
+
+// An `ifdef in the including file must see a macro defined by an included file.
+TEST(VerilogPreprocessTest, IncludedMacroSelectsConditionalBranchInIncluder) {
+  const std::map<std::string, std::string> files = {
+      {"defs.svh", "`define ENABLED 1\n"}};
+  VerilogPreprocess preprocessor(
+      VerilogPreprocess::Config(
+          {.filter_branches = true, .include_files = true}),
+      InMemoryFileOpener(&files));
+
+  LexerTester lexer(
+      "`include \"defs.svh\"\n"
+      "`ifdef ENABLED\nwire selected;\n`else\nwire rejected;\n`endif\n");
+  const auto pp_data = preprocessor.ScanStream(lexer.GetTokenStreamView());
+
+  EXPECT_TRUE(pp_data.errors.empty());
+  std::string combined;
+  for (const auto &token : pp_data.preprocessed_token_stream) {
+    combined += std::string(token->text());
+  }
+  EXPECT_TRUE(absl::StrContains(combined, "selected")) << combined;
+  EXPECT_FALSE(absl::StrContains(combined, "rejected")) << combined;
+}
+
+// Macros must accumulate across a chain of includes.
+TEST(VerilogPreprocessTest, NestedIncludesAccumulateMacros) {
+  const std::map<std::string, std::string> files = {
+      {"outer.svh", "`include \"inner.svh\"\n`define OUTER 2\n"},
+      {"inner.svh", "`define INNER 1\n"}};
+  VerilogPreprocess preprocessor(
+      VerilogPreprocess::Config(
+          {.filter_branches = true, .include_files = true}),
+      InMemoryFileOpener(&files));
+
+  LexerTester lexer("`include \"outer.svh\"\n");
+  const auto pp_data = preprocessor.ScanStream(lexer.GetTokenStreamView());
+
+  EXPECT_TRUE(pp_data.errors.empty());
+  EXPECT_THAT(pp_data.macro_definitions,
+              testing::Contains(testing::Key("INNER")));
+  EXPECT_THAT(pp_data.macro_definitions,
+              testing::Contains(testing::Key("OUTER")));
+  // Every file in the chain is retained, so the tokens pointing into their
+  // text stay valid.
+  EXPECT_EQ(pp_data.included_files.size(), 2);
+}
+
+// A preprocessing error inside an included file must be reported and must stop
+// preprocessing, rather than being swallowed by the shared-data plumbing.
+TEST(VerilogPreprocessTest, ErrorInsideIncludedFileIsReported) {
+  const std::map<std::string, std::string> files = {
+      {"broken.svh", "`ifdef FOO\nwire w;\n"}};  // never closed with `endif
+  VerilogPreprocess preprocessor(
+      VerilogPreprocess::Config(
+          {.filter_branches = true, .include_files = true}),
+      InMemoryFileOpener(&files));
+
+  LexerTester lexer("`include \"broken.svh\"\nmodule m; endmodule\n");
+  const auto pp_data = preprocessor.ScanStream(lexer.GetTokenStreamView());
+
+  ASSERT_FALSE(pp_data.errors.empty())
+      << "an unterminated `ifdef in an included file must be reported";
+  EXPECT_THAT(pp_data.errors.front().error_message,
+              StartsWith("Unterminated preprocessing conditional"));
+}
+
+// A missing include file is an error on the `include token itself.
+TEST(VerilogPreprocessTest, MissingIncludeFileIsReported) {
+  const std::map<std::string, std::string> files = {};
+  VerilogPreprocess preprocessor(
+      VerilogPreprocess::Config(
+          {.filter_branches = true, .include_files = true}),
+      InMemoryFileOpener(&files));
+
+  LexerTester lexer("`include \"absent.svh\"\n");
+  const auto pp_data = preprocessor.ScanStream(lexer.GetTokenStreamView());
+
+  ASSERT_FALSE(pp_data.errors.empty());
+  EXPECT_TRUE(
+      absl::StrContains(pp_data.errors.front().error_message, "absent.svh"))
+      << pp_data.errors.front().error_message;
+}
+
+// The `define of an included file has no position in the including file, so it
+// is not forwarded into its token stream; only its effect is visible.
+TEST(VerilogPreprocessTest, IncludedFileDirectivesAreNotForwarded) {
+  const std::map<std::string, std::string> files = {
+      {"defs.svh", "`define A 1\n`undef A\n`define B 2\n"}};
+  VerilogPreprocess preprocessor(
+      VerilogPreprocess::Config(
+          {.filter_branches = true, .include_files = true}),
+      InMemoryFileOpener(&files));
+
+  LexerTester lexer("`include \"defs.svh\"\nmodule m; endmodule\n");
+  const auto pp_data = preprocessor.ScanStream(lexer.GetTokenStreamView());
+
+  EXPECT_TRUE(pp_data.errors.empty());
+  for (const auto &token : pp_data.preprocessed_token_stream) {
+    EXPECT_NE(token->token_enum(), PP_define)
+        << "`define from an included file leaked into the token stream";
+    EXPECT_NE(token->token_enum(), PP_undef)
+        << "`undef from an included file leaked into the token stream";
+  }
+  // `undef A ran inside the include, so only B survives.
+  EXPECT_THAT(pp_data.macro_definitions, testing::Contains(testing::Key("B")));
+  EXPECT_THAT(pp_data.macro_definitions,
+              testing::Not(testing::Contains(testing::Key("A"))));
+}
+
+// Command-line defines reach an included file too.
+TEST(VerilogPreprocessTest, CommandLineDefinesAreVisibleInsideIncludedFile) {
+  const std::map<std::string, std::string> files = {
+      {"defs.svh", "`ifdef FROM_CMDLINE\n`define REACHED 1\n`endif\n"}};
+  VerilogPreprocess preprocessor(
+      VerilogPreprocess::Config(
+          {.filter_branches = true, .include_files = true}),
+      InMemoryFileOpener(&files));
+  FileList::PreprocessingInfo preprocessing_info;
+  preprocessing_info.defines.emplace_back("FROM_CMDLINE", "1");
+  preprocessor.setPreprocessingInfo(preprocessing_info);
+
+  LexerTester lexer("`include \"defs.svh\"\n");
+  const auto pp_data = preprocessor.ScanStream(lexer.GetTokenStreamView());
+
+  EXPECT_TRUE(pp_data.errors.empty());
+  EXPECT_THAT(pp_data.macro_definitions,
+              testing::Contains(testing::Key("REACHED")));
+}
+
 }  // namespace
 }  // namespace verilog

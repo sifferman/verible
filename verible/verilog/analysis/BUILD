@@ -169,6 +169,7 @@ cc_library(
         "verilog-excerpt-parse.h",
     ],
     deps = [
+        ":verilog-filelist",
         "//verible/common/analysis:file-analyzer",
         "//verible/common/lexer:token-stream-adapter",
         "//verible/common/strings:comment-utils",
@@ -250,8 +251,10 @@ cc_library(
         ":default-rules",
         ":lint-rule-registry",
         ":verilog-analyzer",
+        ":verilog-filelist",
         ":verilog-linter-configuration",
         ":verilog-linter-constants",
+        ":verilog-project",
         "//verible/common/analysis:citation",
         "//verible/common/analysis:line-linter",
         "//verible/common/analysis:lint-rule-status",
@@ -269,6 +272,7 @@ cc_library(
         "//verible/common/util:status-macros",
         "//verible/verilog/parser:verilog-token-classifications",
         "//verible/verilog/parser:verilog-token-enum",
+        "//verible/verilog/preprocessor:verilog-preprocess",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/log:die_if_null",
@@ -284,6 +288,8 @@ cc_test(
     srcs = ["verilog-analyzer_test.cc"],
     deps = [
         ":verilog-analyzer",
+        ":verilog-filelist",
+        "//verible/verilog/preprocessor:verilog-preprocess",
         "//verible/common/analysis:file-analyzer",
         "//verible/common/strings:display-utils",
         "//verible/common/text:concrete-syntax-leaf",
@@ -337,6 +343,7 @@ cc_test(
     deps = [
         ":default-rules",
         ":verilog-analyzer",
+        ":verilog-filelist",
         ":verilog-linter",
         ":verilog-linter-configuration",
         "//verible/common/analysis:lint-rule-status",

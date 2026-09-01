@@ -34,8 +34,8 @@
 #include "verible/common/analysis/violation-handler.h"
 #include "verible/common/util/enum-flags.h"
 #include "verible/common/util/init-command-line.h"
-#include "verible/common/util/iterator-range.h"
 #include "verible/common/util/logging.h"  // for operator<<, LOG, LogMessage, etc
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 #include "verible/verilog/analysis/verilog-linter.h"
 
@@ -216,16 +216,27 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  const verilog::LintOneFileOptions lint_options{
+  // Positional arguments are file names, +incdir+ include directories and
+  // +define+ macro definitions.  Exclude program name.
+  const std::vector<std::string_view> positional_args(args.begin() + 1,
+                                                      args.end());
+  verilog::FileList file_list;
+  if (const auto status =
+          verilog::AppendFileListFromCommandline(positional_args, &file_list);
+      !status.ok()) {
+    std::cerr << status.message() << "\n";
+    return 2;
+  }
+
+  verilog::LintOneFileOptions lint_options{
       .check_syntax = absl::GetFlag(FLAGS_check_syntax),
       .parse_fatal = absl::GetFlag(FLAGS_parse_fatal),
       .lint_fatal = absl::GetFlag(FLAGS_lint_fatal),
       .show_context = absl::GetFlag(FLAGS_show_diagnostic_context),
+      .preprocessing_info = &file_list.preprocessing,
   };
 
-  // All positional arguments are file names.  Exclude program name.
-  for (const std::string_view filename :
-       verible::make_range(args.begin() + 1, args.end())) {
+  for (const std::string_view filename : file_list.file_paths) {
     // Copy configuration, so that it can be locally modified per file.
     auto config_status = verilog::LinterConfigurationFromFlags(filename);
     if (!config_status.ok()) {

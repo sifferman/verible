@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -113,7 +114,41 @@ class TextStructureView {
     return GetLineColumnMap().GetLineColAtOffset(contents_, bytes_offset);
   }
 
+  // The text of one of the source files this structure spans, and the name of
+  // that file. 'filename' is empty for this structure's own Contents().
+  struct SourceFile {
+    std::string_view contents;
+    std::string_view filename;
+
+    bool empty() const { return contents.data() == nullptr; }
+  };
+
+  // Registers a source file pulled in by `include, whose text the tokens and
+  // syntax tree of this structure are then permitted to point into, in
+  // addition to Contents().
+  //
+  // Preprocessing `include directives yields a single token stream and a
+  // single syntax tree spanning several files, so their text no longer lies
+  // within Contents() alone. Registering each included file here is what keeps
+  // the consistency checks meaningful for such a tree -- they validate against
+  // every source file the tree may legitimately reference, instead of being
+  // skipped -- and lets diagnostics resolve a token to a line and column in
+  // the file it actually came from.
+  //
+  // Ownership of 'included_file' transfers to this object, so that the text
+  // outlives the tokens and tree leaves pointing into it: those are inspected
+  // by the consistency check that runs in this object's own destructor.
+  void RegisterIncludedFile(std::unique_ptr<TextStructure> included_file,
+                            std::string_view filename);
+
+  // Returns the source file whose text contains 'text', or an empty SourceFile
+  // if no source file of this structure does. 'text' is typically the text of
+  // a token or of a syntax tree leaf.
+  SourceFile FindSourceFileContaining(std::string_view text) const;
+
   // Convenience function: Given the token, return the range it covers.
+  // For a token from an included file, the range is relative to that file;
+  // FindSourceFileContaining() identifies which one.
   LineColumnRange GetRangeForToken(const TokenInfo &token) const;
 
   // Convenience function: Given a text snippet, that needs to be a substring
@@ -198,6 +233,28 @@ class TextStructureView {
   // Mutable as we fill it lazily on request; conceptually the data is const.
   mutable LinesInfo lazy_lines_info_;
 
+  // A source file pulled in by `include whose text the tokens and syntax tree
+  // of this structure may point into, in addition to contents_.
+  struct IncludedFile {
+    // Owns the text of the included file, which outlives the tokens and tree
+    // leaves that point into it.
+    std::unique_ptr<TextStructure> text;
+    std::string filename;
+
+    // Line info for the text of this included file, so that a token from it
+    // resolves to a line and column within its own file.
+    // Mutable as we fill it lazily on request, as with lazy_lines_info_.
+    mutable LinesInfo lazy_lines_info;
+
+    // The text of the included file. Defined out-of-line because TextStructure
+    // is incomplete here.
+    std::string_view Contents() const;
+  };
+
+  // Held by unique_ptr so that registering another file does not move the
+  // lazily-filled LinesInfo that outstanding LineColumnMap references point to.
+  std::vector<std::unique_ptr<IncludedFile>> included_files_;
+
   // Tokens that constitute the original file (contents_).
   // This should always be terminated with a sentinel EOF token.
   TokenSequence tokens_;
@@ -211,6 +268,10 @@ class TextStructureView {
 
   // Tree representation of file contents.
   ConcreteSyntaxTree syntax_tree_;
+
+  // Line info of whichever source file owns 'contents', which is either
+  // contents_ or the text of a file registered by RegisterIncludedFile().
+  const LinesInfo &LinesInfoForContents(std::string_view contents) const;
 
   void TrimSyntaxTree(int first_token_offset, int last_token_offset);
 
@@ -268,6 +329,12 @@ class TextStructure {
   friend class TextStructureTokenized;
   friend class TextStructureViewPublicTest_ExpandSubtreesOneLeaf_Test;
   friend class TextStructureViewPublicTest_ExpandSubtreesMultipleLeaves_Test;
+  friend class
+      TextStructureViewIncludedFileTest_RegisteredFileIsPartOfStructure_Test;
+  friend class
+      TextStructureViewIncludedFileTest_ForeignTextHasNoSourceFile_Test;
+  friend class
+      TextStructureViewIncludedFileTest_OwnContentsWinsOverIncluded_Test;
   friend class verilog::VerilogPreprocess;  // NOLINT
 
   explicit TextStructure(std::shared_ptr<MemBlock> contents);

@@ -33,6 +33,7 @@
 #include "verible/common/strings/line-column-map.h"
 #include "verible/common/text/text-structure.h"
 #include "verible/verilog/analysis/lint-rule-registry.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 
 // Flag is declared for testing purposes (used e.g. in
@@ -59,6 +60,16 @@ struct LintOneFileOptions {
 
   // Quote the offending source line underneath each diagnostic.
   bool show_context = false;
+
+  // Include directories and defines for the preprocessor. When this names at
+  // least one include directory or define, the file is fully preprocessed:
+  // `include directives are resolved and macros expanded. Otherwise the file
+  // is analyzed unpreprocessed, which retains more information for the lint
+  // rules. Not owned; must outlive the call.
+  const FileList::PreprocessingInfo *preprocessing_info = nullptr;
+
+  // Directory that relative `include paths are resolved against.
+  std::string_view include_root = ".";
 };
 
 // Checks a single file for Verilog style lint violations.
@@ -67,7 +78,8 @@ struct LintOneFileOptions {
 // 'filename' is the path to the file to analyze.
 // 'config' controls lint rules for analysis.
 // 'violation_handler' controls what to do with violations.
-// 'options' selects syntax checking and fatality; see LintOneFileOptions.
+// 'options' selects syntax checking, fatality and preprocessing; see
+// LintOneFileOptions.
 // Returns an exit_code like status where 0 means success, 1 means some
 // errors were found (syntax, lint), and anything else is a fatal error.
 int LintOneFile(std::ostream *stream, std::string_view filename,

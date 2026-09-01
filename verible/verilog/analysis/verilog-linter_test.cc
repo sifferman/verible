@@ -47,6 +47,7 @@
 #include "verible/common/util/logging.h"
 #include "verible/verilog/analysis/default-rules.h"
 #include "verible/verilog/analysis/verilog-analyzer.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 
 namespace verilog {
@@ -56,7 +57,9 @@ using ::testing::EndsWith;
 using ::testing::StartsWith;
 using verible::ViolationFixer;
 using verible::ViolationPrinter;
+using verible::file::CreateDir;
 using verible::file::GetContentAsString;
+using verible::file::JoinPath;
 using verible::file::testing::ScopedTestFile;
 
 class DefaultLinterConfigTestFixture {
@@ -217,6 +220,121 @@ TEST_F(LintOneFileTest, LintError) {
       EXPECT_FALSE(output.str().empty());
     }
   }
+}
+
+// Lints a file that pulls in a module with `include, with the include
+// directory supplied the way +incdir+ supplies it.
+TEST_F(LintOneFileTest, LintsFileWithIncludeDirectory) {
+  const std::string include_dir = JoinPath(testing::TempDir(), "lint-incdir");
+  ASSERT_TRUE(CreateDir(include_dir).ok());
+  const ScopedTestFile included(
+      include_dir, "class included_class;\nendclass\n", "included.svh");
+  const ScopedTestFile source(testing::TempDir(),
+                              "`include \"included.svh\"\n"
+                              "class foo;\nendclass : foo\n");
+
+  FileList::PreprocessingInfo preprocessing_info;
+  preprocessing_info.include_dirs.push_back(include_dir);
+
+  std::ostringstream output;
+  ViolationPrinter violation_printer(&output);
+  const int exit_code =
+      LintOneFile(&output, source.filename(), config_, &violation_printer,
+                  {.check_syntax = true,
+                   .parse_fatal = true,
+                   .lint_fatal = false,
+                   .show_context = false,
+                   .preprocessing_info = &preprocessing_info});
+  EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
+  EXPECT_TRUE(output.str().empty()) << output.str();
+}
+
+// A macro from an included file must be expanded before the lint rules run.
+TEST_F(LintOneFileTest, ExpandsMacroFromIncludedFile) {
+  const std::string include_dir =
+      JoinPath(testing::TempDir(), "lint-incdir-macro");
+  ASSERT_TRUE(CreateDir(include_dir).ok());
+  const ScopedTestFile included(include_dir, "`define BODY endclass\n",
+                                "macro.svh");
+  const ScopedTestFile source(testing::TempDir(),
+                              "`include \"macro.svh\"\nclass foo;\n`BODY\n");
+
+  FileList::PreprocessingInfo preprocessing_info;
+  preprocessing_info.include_dirs.push_back(include_dir);
+
+  std::ostringstream output;
+  ViolationPrinter violation_printer(&output);
+  const int exit_code =
+      LintOneFile(&output, source.filename(), config_, &violation_printer,
+                  {.check_syntax = true,
+                   .parse_fatal = true,
+                   .lint_fatal = false,
+                   .show_context = false,
+                   .preprocessing_info = &preprocessing_info});
+  EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
+}
+
+// A syntax error must be reported the same way whether or not preprocessing is
+// enabled: as a diagnostic on 'stream' with exit code 1, never as a bare fatal.
+TEST_F(LintOneFileTest, ReportsSyntaxErrorsWithPreprocessingEnabled) {
+  const ScopedTestFile source(testing::TempDir(), "class foo;\n");  // no end
+
+  FileList::PreprocessingInfo preprocessing_info;
+  preprocessing_info.defines.emplace_back("SOME_DEFINE", "1");
+
+  std::ostringstream output;
+  ViolationPrinter violation_printer(&output);
+  const int exit_code =
+      LintOneFile(&output, source.filename(), config_, &violation_printer,
+                  {.check_syntax = true,
+                   .parse_fatal = true,
+                   .lint_fatal = false,
+                   .show_context = false,
+                   .preprocessing_info = &preprocessing_info});
+  EXPECT_EQ(exit_code, 1) << "output:\n" << output.str();
+  EXPECT_FALSE(output.str().empty())
+      << "a syntax error must be described on the output stream";
+}
+
+// A +define+ from the command line must select `ifdef branches.
+TEST_F(LintOneFileTest, CommandLineDefineSelectsConditionalBranch) {
+  const ScopedTestFile source(testing::TempDir(),
+                              "`ifdef ENABLED\nclass foo;\nendclass\n"
+                              "`else\nthis is not verilog\n`endif\n");
+
+  FileList::PreprocessingInfo preprocessing_info;
+  preprocessing_info.defines.emplace_back("ENABLED", "1");
+
+  std::ostringstream output;
+  ViolationPrinter violation_printer(&output);
+  const int exit_code =
+      LintOneFile(&output, source.filename(), config_, &violation_printer,
+                  {.check_syntax = true,
+                   .parse_fatal = true,
+                   .lint_fatal = false,
+                   .show_context = false,
+                   .preprocessing_info = &preprocessing_info});
+  EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
+}
+
+// Empty preprocessing information must leave the default unpreprocessed
+// analysis in place.
+TEST_F(LintOneFileTest, EmptyPreprocessingInfoKeepsDefaultAnalysis) {
+  const ScopedTestFile source(testing::TempDir(),
+                              "class foo;\nendclass : foo\n");
+  const FileList::PreprocessingInfo preprocessing_info;
+
+  std::ostringstream output;
+  ViolationPrinter violation_printer(&output);
+  const int exit_code =
+      LintOneFile(&output, source.filename(), config_, &violation_printer,
+                  {.check_syntax = true,
+                   .parse_fatal = true,
+                   .lint_fatal = false,
+                   .show_context = false,
+                   .preprocessing_info = &preprocessing_info});
+  EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
+  EXPECT_TRUE(output.str().empty());
 }
 
 class VerilogLinterTest : public DefaultLinterConfigTestFixture,

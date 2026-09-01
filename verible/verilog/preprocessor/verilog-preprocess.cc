@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/log/die_if_null.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -61,6 +62,20 @@ VerilogPreprocess::VerilogPreprocess(const Config &config, FileOpener opener)
       BranchBlock(true, true, verible::TokenInfo::EOFToken()));
 }
 
+VerilogPreprocess::VerilogPreprocess(
+    const Config &config, FileOpener opener, VerilogPreprocessData *shared_data,
+    const FileList::PreprocessingInfo *preprocess_info)
+    : config_(config),
+      preprocess_data_(ABSL_DIE_IF_NULL(shared_data)),
+      preprocess_info_(preprocess_info),
+      file_opener_(std::move(opener)) {
+  // Same toplevel always-selected conditional as the other constructors; an
+  // included file gets its own conditional nesting, which the standard
+  // requires to be balanced within that file.
+  conditional_block_.push(
+      BranchBlock(true, true, verible::TokenInfo::EOFToken()));
+}
+
 TokenStreamView::const_iterator VerilogPreprocess::GenerateBypassWhiteSpaces(
     const StreamIteratorGenerator &generator) {
   auto iterator =
@@ -77,13 +92,13 @@ VerilogPreprocess::ExtractMacroName(const StreamIteratorGenerator &generator) {
   TokenStreamView::const_iterator token_iter =
       GenerateBypassWhiteSpaces(generator);
   if ((*token_iter)->isEOF()) {
-    preprocess_data_.errors.emplace_back(
+    preprocess_data_->errors.emplace_back(
         **token_iter, "unexpected EOF where expecting macro name");
     return absl::InvalidArgumentError("Unexpected EOF");
   }
   const auto &macro_name = *token_iter;
   if (macro_name->token_enum() != PP_Identifier) {
-    preprocess_data_.errors.emplace_back(
+    preprocess_data_->errors.emplace_back(
         **token_iter,
         absl::StrCat("Expected identifier for macro name, but got \"",
                      macro_name->text(), "...\""));
@@ -291,9 +306,9 @@ absl::Status VerilogPreprocess::HandleMacroIdentifier(
   // Finding the macro definition.
   const std::string_view sv = (*iter)->text();
   const auto *found =
-      FindOrNull(preprocess_data_.macro_definitions, sv.substr(1));
+      FindOrNull(preprocess_data_->macro_definitions, sv.substr(1));
   if (!found) {
-    preprocess_data_.errors.emplace_back(
+    preprocess_data_->errors.emplace_back(
         **iter,
         "Error expanding macro identifier, might not be defined before.");
     return absl::InvalidArgumentError(
@@ -306,12 +321,12 @@ absl::Status VerilogPreprocess::HandleMacroIdentifier(
         ConsumeAndParseMacroCall(iter, generator, &macro_call, *found));
     RETURN_IF_ERROR(ExpandMacro(macro_call, found));
   }
-  auto &lexed = preprocess_data_.lexed_macros_backup.back();
+  auto &lexed = preprocess_data_->lexed_macros_backup.back();
   if (!forward) return absl::OkStatus();
   auto iter_generator = verible::MakeConstIteratorStreamer(lexed);
   const auto it_end = lexed.end();
   for (auto it = iter_generator(); it != it_end; it++) {
-    preprocess_data_.preprocessed_token_stream.push_back(it);
+    preprocess_data_->preprocessed_token_stream.push_back(it);
   }
   return absl::OkStatus();
 }
@@ -321,11 +336,11 @@ void VerilogPreprocess::RegisterMacroDefinition(
     const MacroDefinition &definition) {
   // For now, unconditionally register the macro definition, keeping the last
   // definition if macro is re-defined.
-  const bool inserted = InsertOrUpdate(&preprocess_data_.macro_definitions,
+  const bool inserted = InsertOrUpdate(&preprocess_data_->macro_definitions,
                                        definition.Name(), definition);
   if (inserted) return;
-  preprocess_data_.warnings.emplace_back(definition.NameToken(),
-                                         "Re-defining macro");
+  preprocess_data_->warnings.emplace_back(definition.NameToken(),
+                                          "Re-defining macro");
   // TODO(hzeller): multiline warning with 'previously defined here' location
 }
 
@@ -416,8 +431,8 @@ static void ProcessTokenConcatenation(verible::TokenSequence *tokens,
 
 // This function expands a text.
 // The expanded tokens are saved as a TokenSequence, stored at
-// preprocess_data_.lexed_macros_backup Can be accessed directly after expansion
-// as: preprocess_data_.lexed_macros_backup.back()
+// preprocess_data_->lexed_macros_backup Can be accessed directly after
+// expansion as: preprocess_data_->lexed_macros_backup.back()
 absl::Status VerilogPreprocess::ExpandText(
     const std::string_view &definition_text) {
   VerilogLexer lexer(definition_text);
@@ -451,7 +466,7 @@ absl::Status VerilogPreprocess::ExpandText(
         last_token.token_enum() == MacroCallId) {
       RETURN_IF_ERROR(HandleMacroIdentifier(iter, iter_generator, false));
       // merge the expanded macro tokens into 'expanded_lexed_sequence'
-      auto &expanded_child = preprocess_data_.lexed_macros_backup.back();
+      auto &expanded_child = preprocess_data_->lexed_macros_backup.back();
       for (auto &u : expanded_child) expanded_lexed_sequence.push_back(u);
       continue;
     }
@@ -459,9 +474,9 @@ absl::Status VerilogPreprocess::ExpandText(
   }
 
   // Process token concatenation operators.
-  ProcessTokenConcatenation(&expanded_lexed_sequence, &preprocess_data_);
+  ProcessTokenConcatenation(&expanded_lexed_sequence, preprocess_data_);
 
-  preprocess_data_.lexed_macros_backup.emplace_back(expanded_lexed_sequence);
+  preprocess_data_->lexed_macros_backup.emplace_back(expanded_lexed_sequence);
   return absl::OkStatus();
 }
 
@@ -507,7 +522,7 @@ absl::Status VerilogPreprocess::ExpandMacro(
         last_token.token_enum() == MacroCallId) {
       RETURN_IF_ERROR(HandleMacroIdentifier(iter, iter_generator, false));
       // merge the expanded macro tokens into 'expanded_lexed_sequence'
-      auto &expanded_child = preprocess_data_.lexed_macros_backup.back();
+      auto &expanded_child = preprocess_data_->lexed_macros_backup.back();
       for (auto &u : expanded_child) expanded_lexed_sequence.push_back(u);
       continue;
     }
@@ -517,7 +532,7 @@ absl::Status VerilogPreprocess::ExpandMacro(
       if (replacement) {
         RETURN_IF_ERROR(ExpandText(replacement->text()));
         // merge the expanded macro tokens into 'expanded_lexed_sequence'
-        auto &expanded_child = preprocess_data_.lexed_macros_backup.back();
+        auto &expanded_child = preprocess_data_->lexed_macros_backup.back();
         for (auto &u : expanded_child) expanded_lexed_sequence.push_back(u);
         continue;
       }
@@ -526,9 +541,9 @@ absl::Status VerilogPreprocess::ExpandMacro(
   }
 
   // Process token concatenation operators.
-  ProcessTokenConcatenation(&expanded_lexed_sequence, &preprocess_data_);
+  ProcessTokenConcatenation(&expanded_lexed_sequence, preprocess_data_);
 
-  preprocess_data_.lexed_macros_backup.emplace_back(expanded_lexed_sequence);
+  preprocess_data_->lexed_macros_backup.emplace_back(expanded_lexed_sequence);
   return absl::OkStatus();
 }
 
@@ -549,7 +564,7 @@ absl::Status VerilogPreprocess::HandleDefine(
       ParseMacroDefinition(define_tokens, &macro_definition);
 
   if (parse_error_ptr) {
-    preprocess_data_.errors.push_back(*parse_error_ptr);
+    preprocess_data_->errors.push_back(*parse_error_ptr);
     return absl::InvalidArgumentError("Error parsing macro definition.");
   }
 
@@ -558,9 +573,15 @@ absl::Status VerilogPreprocess::HandleDefine(
   if (conditional_block_.top().InSelectedBranch()) {
     RegisterMacroDefinition(macro_definition);
 
-    // For now, forward all definition tokens.
-    for (const auto &token : define_tokens) {
-      preprocess_data_.preprocessed_token_stream.push_back(token);
+    // For now, forward all definition tokens. The directives of an included
+    // file are not forwarded: the including file's token stream describes the
+    // text of the including file, and a `define read from elsewhere has no
+    // source location in it. Its effect is already carried by the shared
+    // macro_definitions.
+    if (!IsPreprocessingIncludedFile()) {
+      for (const auto &token : define_tokens) {
+        preprocess_data_->preprocessed_token_stream.push_back(token);
+      }
     }
   }
 
@@ -575,12 +596,14 @@ absl::Status VerilogPreprocess::HandleUndef(
     return macro_name_extract.status();
   }
   const auto &macro_name = *macro_name_extract.value();
-  preprocess_data_.macro_definitions.erase(macro_name->text());
+  preprocess_data_->macro_definitions.erase(macro_name->text());
 
-  // For now, forward all `undef tokens.
-  if (conditional_block_.top().InSelectedBranch()) {
-    preprocess_data_.preprocessed_token_stream.push_back(*undef_it);
-    preprocess_data_.preprocessed_token_stream.push_back(macro_name);
+  // For now, forward all `undef tokens. As with `define, the directives of an
+  // included file are not forwarded into the including file's token stream.
+  if (conditional_block_.top().InSelectedBranch() &&
+      !IsPreprocessingIncludedFile()) {
+    preprocess_data_->preprocessed_token_stream.push_back(*undef_it);
+    preprocess_data_->preprocessed_token_stream.push_back(macro_name);
   }
   return absl::OkStatus();
 }
@@ -589,7 +612,7 @@ absl::Status VerilogPreprocess::HandleIf(
     const TokenStreamView::const_iterator ifpos,  // `ifdef, `ifndef, `elseif
     const StreamIteratorGenerator &generator) {
   if (!config_.filter_branches) {  // nothing to do.
-    preprocess_data_.preprocessed_token_stream.push_back(*ifpos);
+    preprocess_data_->preprocessed_token_stream.push_back(*ifpos);
     return absl::OkStatus();
   }
 
@@ -599,19 +622,19 @@ absl::Status VerilogPreprocess::HandleIf(
   }
   const auto &macro_name = *macro_name_extract.value();
   const bool negative_if = (*ifpos)->token_enum() == PP_ifndef;
-  const auto &defs = preprocess_data_.macro_definitions;
+  const auto &defs = preprocess_data_->macro_definitions;
   const bool name_is_defined = defs.find(macro_name->text()) != defs.end();
   const bool condition_met = (name_is_defined ^ negative_if);
 
   if ((*ifpos)->token_enum() == PP_elsif) {
     if (conditional_block_.size() <= 1) {
-      preprocess_data_.errors.emplace_back(**ifpos, "Unmatched `elsif");
+      preprocess_data_->errors.emplace_back(**ifpos, "Unmatched `elsif");
       return absl::InvalidArgumentError("Unmatched `else");
     }
     if (!conditional_block_.top().UpdateCondition(**ifpos, condition_met)) {
-      preprocess_data_.errors.emplace_back(**ifpos, "`elsif after `else");
-      preprocess_data_.errors.emplace_back(conditional_block_.top().token(),
-                                           "Previous `else started here.");
+      preprocess_data_->errors.emplace_back(**ifpos, "`elsif after `else");
+      preprocess_data_->errors.emplace_back(conditional_block_.top().token(),
+                                            "Previous `else started here.");
       return absl::InvalidArgumentError("Duplicate `else");
     }
   } else {
@@ -625,19 +648,19 @@ absl::Status VerilogPreprocess::HandleIf(
 absl::Status VerilogPreprocess::HandleElse(
     TokenStreamView::const_iterator else_pos) {
   if (!config_.filter_branches) {  // nothing to do.
-    preprocess_data_.preprocessed_token_stream.push_back(*else_pos);
+    preprocess_data_->preprocessed_token_stream.push_back(*else_pos);
     return absl::OkStatus();
   }
 
   if (conditional_block_.size() <= 1) {
-    preprocess_data_.errors.emplace_back(**else_pos, "Unmatched `else");
+    preprocess_data_->errors.emplace_back(**else_pos, "Unmatched `else");
     return absl::InvalidArgumentError("Unmatched `else");
   }
 
   if (!conditional_block_.top().StartElse(**else_pos)) {
-    preprocess_data_.errors.emplace_back(**else_pos, "Duplicate `else");
-    preprocess_data_.errors.emplace_back(conditional_block_.top().token(),
-                                         "Previous `else started here.");
+    preprocess_data_->errors.emplace_back(**else_pos, "Duplicate `else");
+    preprocess_data_->errors.emplace_back(conditional_block_.top().token(),
+                                          "Previous `else started here.");
     return absl::InvalidArgumentError("Duplicate `else");
   }
   return absl::OkStatus();
@@ -646,12 +669,12 @@ absl::Status VerilogPreprocess::HandleElse(
 absl::Status VerilogPreprocess::HandleEndif(
     TokenStreamView::const_iterator endif_pos) {
   if (!config_.filter_branches) {  // nothing to do.
-    preprocess_data_.preprocessed_token_stream.push_back(*endif_pos);
+    preprocess_data_->preprocessed_token_stream.push_back(*endif_pos);
     return absl::OkStatus();
   }
 
   if (conditional_block_.size() <= 1) {
-    preprocess_data_.errors.emplace_back(**endif_pos, "Unmatched `endif");
+    preprocess_data_->errors.emplace_back(**endif_pos, "Unmatched `endif");
     return absl::InvalidArgumentError("Unmatched `endif");
   }
   conditional_block_.pop();
@@ -686,8 +709,8 @@ absl::Status VerilogPreprocess::HandleInclude(
   auto file_token_iter = *token_iter;
   if (file_token_iter->token_enum() != TK_StringLiteral &&
       file_token_iter->token_enum() != TK_AngleBracketInclude) {
-    preprocess_data_.errors.emplace_back(**token_iter,
-                                         "Expected a path to a SV file.");
+    preprocess_data_->errors.emplace_back(**token_iter,
+                                          "Expected a path to a SV file.");
     return absl::InvalidArgumentError("Expected a path to a SV file.");
   }
   // Currently the file path looks like "path", we need to remove "" or <>
@@ -699,25 +722,18 @@ absl::Status VerilogPreprocess::HandleInclude(
   // Use the provided FileOpener to open the included file.
   const auto status_or_file = file_opener_(file_path.string());
   if (!status_or_file.ok()) {
-    preprocess_data_.errors.emplace_back(
+    preprocess_data_->errors.emplace_back(
         **token_iter, std::string(status_or_file.status().message()));
     return status_or_file.status();
   }
   const std::string_view source_contents = *status_or_file;
 
-  // Creating a new "VerilogPreprocess" object for the included file,
-  // With the same configuration and preprocessing info (defines, incdirs) as
-  // the main one.
-  // TODO(karimtera): Ideally modify the FileOpener to return
-  // absl::StatusOr<MemBlock> to avoid doing a second copy inside TextStructure.
-  verilog::VerilogPreprocess child_preprocessor(config_, file_opener_);
-  child_preprocessor.setPreprocessingInfo(preprocess_info_);
-
   // TODO(karimtera): limit number of nested includes, detect cycles? maybe.
-  preprocess_data_.included_text_structure.emplace_back(
-      new verible::TextStructure(source_contents));
+  preprocess_data_->included_files.push_back(
+      {file_path.string(), std::unique_ptr<verible::TextStructure>(
+                               new verible::TextStructure(source_contents))});
   verible::TextStructure &included_structure =
-      *preprocess_data_.included_text_structure.back();
+      *preprocess_data_->included_files.back().text;
 
   // "included_sequence" should contain the lexed token sequence.
   verible::TokenSequence &included_sequence =
@@ -730,33 +746,18 @@ absl::Status VerilogPreprocess::HandleInclude(
     included_sequence.push_back(lexer.GetLastToken());
   }
 
-  // Preprocessing the included file tokens.
+  // Preprocessing the included file tokens with a child preprocessor sharing
+  // this one's configuration, preprocessing info (defines, incdirs) and
+  // results. Sharing the results is what makes a macro defined by the included
+  // file visible to the rest of this file, and it means the expanded tokens and
+  // the text structures backing them need no merging afterwards.
+  // TODO(karimtera): Ideally modify the FileOpener to return
+  // absl::StatusOr<MemBlock> to avoid doing a second copy inside TextStructure.
   verible::TokenStreamView lexed_streamview;
   InitTokenStreamView(included_sequence, &lexed_streamview);
-  verilog::VerilogPreprocessData child_preprocessed_data =
-      child_preprocessor.ScanStream(lexed_streamview);
-
-  // Check for errors while preprocessing the included file.
-  if (!child_preprocessed_data.errors.empty()) {
-    preprocess_data_.errors.insert(preprocess_data_.errors.end(),
-                                   child_preprocessed_data.errors.begin(),
-                                   child_preprocessed_data.errors.end());
-    return absl::InvalidArgumentError(
-        "Error: the included file preprocessing has failed.");
-  }
-
-  // Need to move the text structures of the child preprocessor to avoid
-  // destruction.
-  for (auto &u : child_preprocessed_data.included_text_structure) {
-    preprocess_data_.included_text_structure.push_back(std::move(u));
-  }
-
-  // Forwarding the included preprocessed view.
-  for (const auto &u : child_preprocessed_data.preprocessed_token_stream) {
-    preprocess_data_.preprocessed_token_stream.push_back(u);
-  }
-
-  return absl::OkStatus();
+  VerilogPreprocess child_preprocessor(config_, file_opener_, preprocess_data_,
+                                       preprocess_info_);
+  return child_preprocessor.ScanIncludedStream(lexed_streamview);
 }
 
 // Interprets preprocessor tokens as directives that act on this preprocessor
@@ -794,17 +795,17 @@ absl::Status VerilogPreprocess::HandleTokenIterator(
   // If not return'ed above, any other tokens are passed through unmodified
   // unless filtered by a branch.
   if (conditional_block_.top().InSelectedBranch()) {
-    preprocess_data_.preprocessed_token_stream.push_back(*iter);
+    preprocess_data_->preprocessed_token_stream.push_back(*iter);
   }
   return absl::OkStatus();
 }
 
 void VerilogPreprocess::setPreprocessingInfo(
     const verilog::FileList::PreprocessingInfo &preprocess_info) {
-  preprocess_info_ = preprocess_info;
+  preprocess_info_ = &preprocess_info;
 
   // Adding defines.
-  for (const auto &define : preprocess_info_.defines) {
+  for (const auto &define : preprocess_info.defines) {
     // manually create the tokens to save them into a MacroDefinition.
     verible::TokenInfo macro_directive(PP_define, "`define");
     verible::TokenInfo macro_name(PP_Identifier, define.name);
@@ -816,31 +817,56 @@ void VerilogPreprocess::setPreprocessingInfo(
     RegisterMacroDefinition(macro_definition);
   }
 
-  // We can directly access "preprocess_info_.include_dirs" whenever needed.
+  // We can directly access "preprocess_info_->include_dirs" whenever needed.
 }
 
-VerilogPreprocessData VerilogPreprocess::ScanStream(
+void VerilogPreprocess::ScanStreamAccumulating(
     const TokenStreamView &token_stream) {
-  preprocess_data_.preprocessed_token_stream.reserve(token_stream.size());
+  preprocess_data_->preprocessed_token_stream.reserve(
+      preprocess_data_->preprocessed_token_stream.size() + token_stream.size());
   auto iter_generator = verible::MakeConstIteratorStreamer(token_stream);
   const auto end = token_stream.end();
   // Token-pulling loop.
   for (auto iter = iter_generator(); iter != end; iter = iter_generator()) {
     const auto status = HandleTokenIterator(iter, iter_generator);
     if (!status.ok()) {
-      // Detailed errors are already in preprocessor_data_.errors.
+      // Detailed errors are already in preprocess_data_->errors.
       break;  // For now, stop after first error.
     }
   }
 
   if (conditional_block_.size() > 1 &&
-      preprocess_data_.errors.empty()) {  // Only report if not followup-error
-    preprocess_data_.errors.emplace_back(
+      preprocess_data_->errors.empty()) {  // Only report if not followup-error
+    preprocess_data_->errors.emplace_back(
         conditional_block_.top().token(),
         "Unterminated preprocessing conditional here, but never completed at "
         "end of file.");
   }
-  return std::move(preprocess_data_);
+}
+
+VerilogPreprocessData VerilogPreprocess::ScanStream(
+    const TokenStreamView &token_stream) {
+  CHECK(!IsPreprocessingIncludedFile())
+      << "ScanStream() returns the accumulated results and so may only be "
+         "called on the preprocessor of a top-level file; the preprocessor of "
+         "an included file accumulates into its includer and must use "
+         "ScanIncludedStream().";
+  ScanStreamAccumulating(token_stream);
+  return std::move(owned_preprocess_data_);
+}
+
+absl::Status VerilogPreprocess::ScanIncludedStream(
+    const TokenStreamView &token_stream) {
+  // Errors raised below are recorded directly in the shared data, so the
+  // includer does not need to merge anything back; it only needs to know
+  // whether to keep going.
+  const size_t errors_before = preprocess_data_->errors.size();
+  ScanStreamAccumulating(token_stream);
+  if (preprocess_data_->errors.size() != errors_before) {
+    return absl::InvalidArgumentError(
+        "Error: the included file preprocessing has failed.");
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace verilog

@@ -15,6 +15,7 @@
 #include "verible/common/text/text-structure.h"
 
 #include <cstddef>
+#include <cstring>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -679,6 +680,55 @@ TEST_F(TextStructureViewInternalsTest, LineTokenMapWrongEnd) {
   --lazy_line_token_map_.back();
   EXPECT_FALSE(FastTokenRangeConsistencyCheck().ok());
   EXPECT_FALSE(InternalConsistencyCheck().ok());
+}
+
+// Text registered with RegisterIncludedFile() belongs to the structure, and
+// resolves to a position within the included file rather than the main one.
+TEST(TextStructureViewIncludedFileTest, RegisteredFileIsPartOfStructure) {
+  TextStructureView view("module top(); endmodule\n");
+  auto included = std::unique_ptr<TextStructure>(
+      new TextStructure("\n\nmodule included_module();\nendmodule\n"));
+  const std::string_view included_contents = included->Data().Contents();
+  view.RegisterIncludedFile(std::move(included), "body.svh");
+
+  const std::string_view name = included_contents.substr(
+      included_contents.find("included_module"), strlen("included_module"));
+
+  EXPECT_TRUE(view.ContainsText(name));
+  const auto source_file = view.FindSourceFileContaining(name);
+  ASSERT_FALSE(source_file.empty());
+  EXPECT_EQ(source_file.filename, "body.svh");
+  EXPECT_TRUE(BoundsEqual(source_file.contents, included_contents));
+
+  // Third line of the included file, rather than of the including file.
+  EXPECT_EQ(view.GetRangeForText(name).start.line, 2);
+}
+
+// Text belonging to neither the structure's own contents nor any registered
+// included file has no owning source file.
+TEST(TextStructureViewIncludedFileTest, ForeignTextHasNoSourceFile) {
+  TextStructureView view("module top(); endmodule\n");
+  auto included = std::unique_ptr<TextStructure>(
+      new TextStructure("module inc(); endmodule\n"));
+  view.RegisterIncludedFile(std::move(included), "body.svh");
+
+  const std::string unrelated = "somewhere else entirely";
+  EXPECT_FALSE(view.ContainsText(unrelated));
+  EXPECT_TRUE(view.FindSourceFileContaining(unrelated).empty());
+}
+
+// The structure's own contents keep an empty filename, distinguishing them
+// from any included file.
+TEST(TextStructureViewIncludedFileTest, OwnContentsWinsOverIncluded) {
+  TextStructureView view("module top(); endmodule\n");
+  auto included = std::unique_ptr<TextStructure>(
+      new TextStructure("module inc(); endmodule\n"));
+  view.RegisterIncludedFile(std::move(included), "body.svh");
+
+  const std::string_view own = view.Contents().substr(0, 6);
+  const auto source_file = view.FindSourceFileContaining(own);
+  ASSERT_FALSE(source_file.empty());
+  EXPECT_TRUE(source_file.filename.empty());
 }
 
 }  // namespace verible

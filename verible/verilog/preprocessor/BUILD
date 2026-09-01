@@ -29,6 +29,7 @@ cc_library(
         "//verible/verilog/parser:verilog-lexer",
         "//verible/verilog/parser:verilog-parser",
         "//verible/verilog/parser:verilog-token-enum",
+        "@abseil-cpp//absl/log:die_if_null",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",

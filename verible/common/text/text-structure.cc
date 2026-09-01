@@ -97,8 +97,8 @@ TokenStreamReferenceView TextStructureView::MakeTokenStreamReferenceView() {
   return CopyWriteableIterators(tokens_, tokens_view_);
 }
 
-const std::vector<TokenSequence::const_iterator> &
-TextStructureView::GetLineTokenMap() const {
+const std::vector<TokenSequence::const_iterator>
+    &TextStructureView::GetLineTokenMap() const {
   // Lazily calculate the map. It is mutable, so we can modify it here.
   if (lazy_line_token_map_.empty()) {
     auto token_iter = tokens_.cbegin();
@@ -132,6 +132,40 @@ TokenRange TextStructureView::TokenRangeSpanningOffsets(size_t lower,
   return make_range(left, right);
 }
 
+std::string_view TextStructureView::IncludedFile::Contents() const {
+  return text->Data().Contents();
+}
+
+void TextStructureView::RegisterIncludedFile(
+    std::unique_ptr<TextStructure> included_file, std::string_view filename) {
+  auto entry = std::make_unique<IncludedFile>();
+  entry->text = std::move(included_file);
+  entry->filename = std::string(filename);
+  included_files_.push_back(std::move(entry));
+}
+
+TextStructureView::SourceFile TextStructureView::FindSourceFileContaining(
+    std::string_view text) const {
+  if (IsSubRange(text, contents_)) return {contents_, ""};
+  for (const auto &included_file : included_files_) {
+    const std::string_view contents = included_file->Contents();
+    if (IsSubRange(text, contents)) return {contents, included_file->filename};
+  }
+  return {};
+}
+
+// Returns the lazily-built line info of whichever source file owns 'contents',
+// so that offsets are resolved against the file the text actually came from.
+const TextStructureView::LinesInfo &TextStructureView::LinesInfoForContents(
+    std::string_view contents) const {
+  for (const auto &included_file : included_files_) {
+    if (BoundsEqual(contents, included_file->Contents())) {
+      return included_file->lazy_lines_info.Get(contents);
+    }
+  }
+  return lazy_lines_info_.Get(contents_);
+}
+
 LineColumnRange TextStructureView::GetRangeForToken(
     const TokenInfo &token) const {
   if (token.isEOF()) {
@@ -140,25 +174,39 @@ LineColumnRange TextStructureView::GetRangeForToken(
     const LineColumn eofPos = GetLineColAtOffset(Contents().length());
     return {eofPos, eofPos};
   }
+  // A token of a tree spanning `include'd files belongs to whichever file its
+  // text lies in; resolving it against Contents() would report a position in
+  // the wrong file, or run off the end of it.
+  const SourceFile source_file = FindSourceFileContaining(token.text());
+  const std::string_view contents =
+      source_file.empty() ? Contents() : source_file.contents;
   // TODO(hzeller): This should simply be GetRangeForText(token.text()),
   // but the more thorough error checking in GetRangeForText()
   // exposes a token overrun in verilog_analyzer_test.cc
   // Defer to fix in separate change.
-  return {GetLineColAtOffset(token.left(Contents())),
-          GetLineColAtOffset(token.right(Contents()))};
+  const LineColumnMap &line_column_map =
+      *LinesInfoForContents(contents).line_column_map;
+  return {line_column_map.GetLineColAtOffset(contents, token.left(contents)),
+          line_column_map.GetLineColAtOffset(contents, token.right(contents))};
 }
 
 LineColumnRange TextStructureView::GetRangeForText(
     std::string_view text) const {
-  const auto from = std::distance(Contents().begin(), text.begin());
-  const auto to = std::distance(Contents().begin(), text.end());
+  const SourceFile source_file = FindSourceFileContaining(text);
+  const std::string_view contents =
+      source_file.empty() ? Contents() : source_file.contents;
+  const auto from = std::distance(contents.begin(), text.begin());
+  const auto to = std::distance(contents.begin(), text.end());
   CHECK_GE(from, 0) << '"' << text << '"';
-  CHECK_LE(to, static_cast<int64_t>(Contents().length())) << '"' << text << '"';
-  return {GetLineColAtOffset(from), GetLineColAtOffset(to)};
+  CHECK_LE(to, static_cast<int64_t>(contents.length())) << '"' << text << '"';
+  const LineColumnMap &line_column_map =
+      *LinesInfoForContents(contents).line_column_map;
+  return {line_column_map.GetLineColAtOffset(contents, from),
+          line_column_map.GetLineColAtOffset(contents, to)};
 }
 
 bool TextStructureView::ContainsText(std::string_view text) const {
-  return IsSubRange(text, Contents());
+  return !FindSourceFileContaining(text).empty();
 }
 
 TokenRange TextStructureView::TokenRangeOnLine(size_t lineno) const {
@@ -343,15 +391,18 @@ absl::Status TextStructureView::FastTokenRangeConsistencyCheck() const {
   const auto lower_bound = contents_.begin();
   const auto upper_bound = contents_.end();
   if (!tokens_.empty()) {
-    // Check that extremities of first and last token lie inside contents_.
+    // Check that extremities of first and last token lie inside the text of
+    // one of this structure's source files. For a structure without `include'd
+    // files that is contents_ alone, and these reduce to a bounds check
+    // against it.
     const TokenInfo &first = tokens_.front();
-    if (!first.isEOF() && lower_bound > first.text().cbegin()) {
+    if (!first.isEOF() && FindSourceFileContaining(first.text()).empty()) {
       return absl::InternalError(absl::StrCat(
           "Token offset points before beginning of string contents.  delta=",
           std::distance(first.text().cbegin(), lower_bound)));
     }
     const TokenInfo *last = FindLastNonEOFToken(tokens_);
-    if (last != nullptr && last->text().cend() > upper_bound) {
+    if (last != nullptr && FindSourceFileContaining(last->text()).empty()) {
       return absl::InternalError(absl::StrCat(
           "Token offset points past end of string contents.  delta=",
           std::distance(upper_bound, last->text().cend())));
@@ -408,23 +459,24 @@ absl::Status TextStructureView::FastLineRangeConsistencyCheck() const {
 
 absl::Status TextStructureView::SyntaxTreeConsistencyCheck() const {
   VLOG(2) << __FUNCTION__;
-  // Check that first and last token in syntax_tree_ point to text
-  // inside contents_.
-  const std::string_view::const_iterator lower_bound = contents_.begin();
-  const std::string_view::const_iterator upper_bound =
-      lower_bound + contents_.length();
-  if (syntax_tree_ != nullptr) {
-    const SyntaxTreeLeaf *left = GetLeftmostLeaf(*syntax_tree_);
-    if (!left) return absl::OkStatus();
-    const SyntaxTreeLeaf *right = GetRightmostLeaf(*syntax_tree_);
-    if (lower_bound > left->get().text().cbegin()) {
-      return absl::InternalError(
-          "Left-most tree leaf points before beginning of contents.");
-    }
-    if (right->get().text().cend() > upper_bound) {
-      return absl::InternalError(
-          "Right-most tree leaf points past end of contents.");
-    }
+  // Check that the first and last token in syntax_tree_ point to text owned by
+  // one of this structure's source files. That is contents_ for a tree parsed
+  // from a single file, and additionally any file registered by
+  // RegisterIncludedFile() for a tree parsed from preprocessed output spanning
+  // `include's.
+  if (syntax_tree_ == nullptr) return absl::OkStatus();
+  const SyntaxTreeLeaf *left = GetLeftmostLeaf(*syntax_tree_);
+  if (!left) return absl::OkStatus();
+  const SyntaxTreeLeaf *right = GetRightmostLeaf(*syntax_tree_);
+  if (FindSourceFileContaining(left->get().text()).empty()) {
+    return absl::InternalError(
+        "Left-most tree leaf points outside of the text of every source file "
+        "of this structure.");
+  }
+  if (FindSourceFileContaining(right->get().text()).empty()) {
+    return absl::InternalError(
+        "Right-most tree leaf points outside of the text of every source file "
+        "of this structure.");
   }
   return absl::OkStatus();
 }

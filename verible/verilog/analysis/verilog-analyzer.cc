@@ -245,6 +245,26 @@ void VerilogAnalyzer::ContextualizeTokens() {
 // Analyzes Verilog code: lexer, filter, parser.
 // Result of parsing is stored in syntax_tree_ (if passed)
 // or rejected_token_ (if failed).
+const verible::TokenStreamView &VerilogAnalyzer::TokenStreamToParse() {
+  // Without `include's the preprocessed stream was copied into TextStructure's
+  // view above, already filtered down to the tokens the parser accepts by
+  // FilterTokensForSyntaxTree().
+  if (preprocessor_data_.included_files.empty()) {
+    return Data().GetTokenStreamView();
+  }
+  // With `include's the stream spans several files and so lives outside
+  // TextStructure; filter it here instead.
+  multi_file_token_stream_.clear();
+  multi_file_token_stream_.reserve(
+      preprocessor_data_.preprocessed_token_stream.size());
+  for (const auto &token : preprocessor_data_.preprocessed_token_stream) {
+    if (VerilogLexer::KeepSyntaxTreeTokens(*token) != 0) {
+      multi_file_token_stream_.push_back(token);
+    }
+  }
+  return multi_file_token_stream_;
+}
+
 absl::Status VerilogAnalyzer::Analyze() {
   // Lex into tokens.
   RETURN_IF_ERROR(Tokenize());
@@ -258,7 +278,12 @@ absl::Status VerilogAnalyzer::Analyze() {
   // pseudo-preprocess token stream.
   //   Not all analyses will want to preprocess.
   {
-    VerilogPreprocess preprocessor(preprocess_config_);
+    VerilogPreprocess preprocessor =
+        file_opener_ ? VerilogPreprocess(preprocess_config_, file_opener_)
+                     : VerilogPreprocess(preprocess_config_);
+    if (preprocessing_info_ != nullptr) {
+      preprocessor.setPreprocessingInfo(*preprocessing_info_);
+    }
     preprocessor_data_ = preprocessor.ScanStream(Data().GetTokenStreamView());
     if (!preprocessor_data_.errors.empty()) {
       for (const auto &error : preprocessor_data_.errors) {
@@ -284,12 +309,28 @@ absl::Status VerilogAnalyzer::Analyze() {
         LOG(INFO) << LinterTokenErrorMessage(warn_token, false);
       }
     }
-    MutableData().MutableTokenStreamView() =
-        preprocessor_data_.preprocessed_token_stream;  // copy
-    // TODO(fangism): could we just move, swap, or directly reference?
+    // Hand the text of every `include'd file to the TextStructure, which from
+    // here on owns it. The preprocessed token stream, and the syntax tree
+    // parsed from it below, point into that text, so it has to outlive both --
+    // including the consistency check that runs in TextStructure's destructor.
+    for (auto &included_file : preprocessor_data_.included_files) {
+      MutableData().RegisterIncludedFile(std::move(included_file.text),
+                                         included_file.path);
+    }
+
+    // TextStructure's token stream view is a view of TextStructure's own token
+    // sequence, so it can hold the preprocessed stream only when that stream
+    // came from this file alone. With `include's expanded the stream spans
+    // several files and TextStructure keeps its own single-file view; see
+    // TokenStreamToParse().
+    if (preprocessor_data_.included_files.empty()) {
+      MutableData().MutableTokenStreamView() =
+          preprocessor_data_.preprocessed_token_stream;  // copy
+      // TODO(fangism): could we just move, swap, or directly reference?
+    }
   }
 
-  auto generator = MakeTokenViewer(Data().GetTokenStreamView());
+  auto generator = MakeTokenViewer(TokenStreamToParse());
   VerilogParser parser(&generator, filename_);
   parse_status_ = FileAnalyzer::Parse(&parser);
   // Here would be appropriate for analyzing the syntax tree.

@@ -216,6 +216,13 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  const verilog::LintOneFileOptions lint_options{
+      .check_syntax = absl::GetFlag(FLAGS_check_syntax),
+      .parse_fatal = absl::GetFlag(FLAGS_parse_fatal),
+      .lint_fatal = absl::GetFlag(FLAGS_lint_fatal),
+      .show_context = absl::GetFlag(FLAGS_show_diagnostic_context),
+  };
+
   // All positional arguments are file names.  Exclude program name.
   for (const std::string_view filename :
        verible::make_range(args.begin() + 1, args.end())) {
@@ -229,10 +236,7 @@ int main(int argc, char **argv) {
     const LinterConfiguration &config = *config_status;
 
     const int lint_status = verilog::LintOneFile(
-        &std::cout, filename, config, violation_handler.get(),
-        absl::GetFlag(FLAGS_check_syntax), absl::GetFlag(FLAGS_parse_fatal),
-        absl::GetFlag(FLAGS_lint_fatal),
-        absl::GetFlag(FLAGS_show_diagnostic_context));
+        &std::cout, filename, config, violation_handler.get(), lint_options);
     exit_status = std::max(lint_status, exit_status);
   }  // for each file
 

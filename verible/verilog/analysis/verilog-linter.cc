@@ -99,12 +99,12 @@ std::set<LintViolationWithStatus> GetSortedViolations(
 
 // Return code useful to be used in main:
 //  0: success
-//  1: linting error (if parse_fatal == true)
+//  1: linting error (if options.parse_fatal == true)
 //  2..: other fatal issues such as file not found.
 int LintOneFile(std::ostream *stream, std::string_view filename,
                 const LinterConfiguration &config,
-                verible::ViolationHandler *violation_handler, bool check_syntax,
-                bool parse_fatal, bool lint_fatal, bool show_context) {
+                verible::ViolationHandler *violation_handler,
+                const LintOneFileOptions &options) {
   const absl::StatusOr<std::string> content_or =
       verible::file::GetContentAsString(filename);
   if (!content_or.ok()) {
@@ -122,16 +122,16 @@ int LintOneFile(std::ostream *stream, std::string_view filename,
   //   is also why we use automatic mode).
   const auto analyzer = VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
       *content_or, filename);
-  if (check_syntax) {
+  if (options.check_syntax) {
     const auto lex_status = ABSL_DIE_IF_NULL(analyzer)->LexStatus();
     const auto parse_status = analyzer->ParseStatus();
     if (!lex_status.ok() || !parse_status.ok()) {
       const std::vector<std::string> syntax_error_messages(
-          analyzer->LinterTokenErrorMessages(show_context));
+          analyzer->LinterTokenErrorMessages(options.show_context));
       for (const auto &message : syntax_error_messages) {
         *stream << message << std::endl;
       }
-      if (parse_fatal) {
+      if (options.parse_fatal) {
         return 1;
         // With syntax-error recovery, one can still continue to analyze a
         // partial syntax tree.
@@ -166,7 +166,7 @@ int LintOneFile(std::ostream *stream, std::string_view filename,
     const std::set<LintViolationWithStatus> violations =
         GetSortedViolations(linter_statuses);
     violation_handler->HandleViolations(violations, text_base, filename);
-    if (lint_fatal) {
+    if (options.lint_fatal) {
       return 1;
     }
   }

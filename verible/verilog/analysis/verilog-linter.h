@@ -46,27 +46,34 @@ namespace verilog {
 std::set<verible::LintViolationWithStatus> GetSortedViolations(
     const std::vector<verible::LintRuleStatus> &statuses);
 
+// Options controlling how LintOneFile() analyzes one file and reports on it.
+struct LintOneFileOptions {
+  // Report lexical and syntax errors found while analyzing the file.
+  bool check_syntax = true;
+
+  // Stop after syntax errors rather than linting the salvaged syntax tree.
+  bool parse_fatal = true;
+
+  // Return nonzero when lint violations are found.
+  bool lint_fatal = true;
+
+  // Quote the offending source line underneath each diagnostic.
+  bool show_context = false;
+};
+
 // Checks a single file for Verilog style lint violations.
 // This is suitable for calling from main().
-// 'stream' is used for printing potential syntax errors (if 'check_syntax' is
-// true).
+// 'stream' is used for printing potential syntax errors.
 // 'filename' is the path to the file to analyze.
 // 'config' controls lint rules for analysis.
 // 'violation_handler' controls what to do with violations.
-// If 'check_syntax' is true, report lexical and syntax errors.
-// If 'parse_fatal' is true, abort after encountering syntax errors, else
-// continue to analyze the salvaged code structure.
-// If 'lint_fatal' is true, exit nonzero on finding lint violations.
+// 'options' selects syntax checking and fatality; see LintOneFileOptions.
 // Returns an exit_code like status where 0 means success, 1 means some
 // errors were found (syntax, lint), and anything else is a fatal error.
-//
-// TODO(hzeller): the options to this function are a lot and many of them
-//   the same type does not help. Make at least the bool options a struct with
-//   names parameters.
 int LintOneFile(std::ostream *stream, std::string_view filename,
                 const LinterConfiguration &config,
-                verible::ViolationHandler *violation_handler, bool check_syntax,
-                bool parse_fatal, bool lint_fatal, bool show_context = false);
+                verible::ViolationHandler *violation_handler,
+                const LintOneFileOptions &options);
 
 // VerilogLinter analyzes a TextStructureView of Verilog source code.
 // This uses syntax-tree based analyses and lexical token-stream analyses.

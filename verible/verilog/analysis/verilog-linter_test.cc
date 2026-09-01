@@ -79,8 +79,11 @@ TEST_F(LintOneFileTest, FileNotFound) {
   std::ostringstream output;
   ViolationPrinter violation_printer(&output);
   const int exit_code =
-      LintOneFile(&output, "FileNotFound.sv", config_, &violation_printer, true,
-                  false, false, false);
+      LintOneFile(&output, "FileNotFound.sv", config_, &violation_printer,
+                  {.check_syntax = true,
+                   .parse_fatal = false,
+                   .lint_fatal = false,
+                   .show_context = false});
   EXPECT_EQ(exit_code, 2);
 }
 
@@ -97,18 +100,24 @@ TEST_F(LintOneFileTest, LintCleanFiles) {
     {
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, true, false, false, false);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = true,
+                                         .parse_fatal = false,
+                                         .lint_fatal = false,
+                                         .show_context = false});
       EXPECT_EQ(exit_code, 0);
       EXPECT_TRUE(output.str().empty());  // silence
     }
     {  // enable additional error context printing
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, true, false, false, true);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = true,
+                                         .parse_fatal = false,
+                                         .lint_fatal = false,
+                                         .show_context = true});
       EXPECT_EQ(exit_code, 0);
       EXPECT_TRUE(output.str().empty());  // silence
     }
@@ -127,36 +136,48 @@ TEST_F(LintOneFileTest, SyntaxError) {
     {  // continue even with syntax error
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, true, false, false, false);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = true,
+                                         .parse_fatal = false,
+                                         .lint_fatal = false,
+                                         .show_context = false});
       EXPECT_EQ(exit_code, 0);
       EXPECT_FALSE(output.str().empty());
     }
     {  // continue even with syntax error with additional error context
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, true, false, false, true);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = true,
+                                         .parse_fatal = false,
+                                         .lint_fatal = false,
+                                         .show_context = true});
       EXPECT_EQ(exit_code, 0);
       EXPECT_FALSE(output.str().empty());
     }
     {  // abort on syntax error
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, true, true, false, false);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = true,
+                                         .parse_fatal = true,
+                                         .lint_fatal = false,
+                                         .show_context = false});
       EXPECT_EQ(exit_code, 1);
       EXPECT_FALSE(output.str().empty());
     }
     {  // ignore syntax error
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, false, false, false, false);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = false,
+                                         .parse_fatal = false,
+                                         .lint_fatal = false,
+                                         .show_context = false});
       EXPECT_EQ(exit_code, 0);
       EXPECT_TRUE(output.str().empty());  // silence
     }
@@ -174,18 +195,24 @@ TEST_F(LintOneFileTest, LintError) {
     {  // continue even with lint error
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, true, false, false, false);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = true,
+                                         .parse_fatal = false,
+                                         .lint_fatal = false,
+                                         .show_context = false});
       EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
       EXPECT_FALSE(output.str().empty());
     }
     {  // abort on lint error
       std::ostringstream output;
       ViolationPrinter violation_printer(&output);
-      const int exit_code =
-          LintOneFile(&output, temp_file.filename(), config_,
-                      &violation_printer, true, false, true, false);
+      const int exit_code = LintOneFile(&output, temp_file.filename(), config_,
+                                        &violation_printer,
+                                        {.check_syntax = true,
+                                         .parse_fatal = false,
+                                         .lint_fatal = true,
+                                         .show_context = false});
       EXPECT_EQ(exit_code, 1) << "output:\n" << output.str();
       EXPECT_FALSE(output.str().empty());
     }

@@ -27,7 +27,6 @@
 //   body text to lexer.  This approach works if the definition text
 //   does not depend on the start-condition state at the macro call site.
 // TODO(fangism): implement conditional evaluation policy (`ifdef, `else, ...)
-// TODO(fangism): token string-ification (turning symbol names into strings)
 // TODO(fangism): evaluate `defines inside `defines at expansion time.
 
 #ifndef VERIBLE_VERILOG_PREPROCESSOR_VERILOG_PREPROCESS_H_
@@ -75,7 +74,8 @@ struct VerilogPreprocessData {
   verible::TokenStreamView preprocessed_token_stream;
   std::vector<TokenSequence> lexed_macros_backup;
 
-  // Owns the text of tokens joined by `` (a``b), which is not in any source.
+  // Owns the text of tokens joined by `` (a``b) and of strings built from
+  // `"...`", which is not in any source.
   // A deque keeps each string at a fixed address as more are added.
   std::deque<std::string> concatenated_token_texts;
 
@@ -135,7 +135,6 @@ class VerilogPreprocess {
   VerilogPreprocessData ScanStream(const TokenStreamView &token_stream);
 
   // TODO(fangism): ExpandMacro, ExpandMacroCall
-  // TODO(b/111544845): ExpandEvalStringLiteral
 
   // Sets the preprocessing information containing defines and incdirs.
   void setPreprocessingInfo(
@@ -187,6 +186,12 @@ class VerilogPreprocess {
   absl::Status ExpandText(const std::string_view &);
   absl::Status ExpandMacro(const verible::MacroCall &,
                            const verible::MacroDefinition *);
+  absl::Status AppendExpandedText(
+      std::string_view, const MacroDefinition::substitution_map_type &,
+      std::string *);
+  absl::Status ExpandEvalStringLiteral(
+      const verible::TokenInfo &,
+      const MacroDefinition::substitution_map_type &);
   absl::Status HandleInclude(TokenStreamView::const_iterator,
                              const StreamIteratorGenerator &);
 

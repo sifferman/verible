@@ -27,6 +27,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_split.h"
 #include "absl/types/span.h"
 #include "verible/common/lexer/token-generator.h"
 #include "verible/common/lexer/token-stream-adapter.h"
@@ -453,6 +454,88 @@ absl::Status VerilogPreprocess::ExpandText(
   return absl::OkStatus();
 }
 
+// Appends the text to *expanded_text, with each formal argument in subs_map
+// and each macro call replaced by its expanded text and each `` deleted.
+// White space is kept as written, since the result goes into a string.
+absl::Status VerilogPreprocess::AppendExpandedText(
+    std::string_view text,
+    const MacroDefinition::substitution_map_type &subs_map,
+    std::string *expanded_text) {
+  VerilogLexer lexer(text);
+  verible::TokenSequence lexed_sequence;
+  for (lexer.DoNextToken(); !lexer.GetLastToken().isEOF();
+       lexer.DoNextToken()) {
+    lexed_sequence.push_back(lexer.GetLastToken());
+  }
+  // Retain EOF end sentinel (see ExpandText).
+  lexed_sequence.push_back(lexer.GetLastToken());
+  verible::TokenStreamView lexed_streamview;
+  InitTokenStreamView(lexed_sequence, &lexed_streamview);
+  auto iter_generator = verible::MakeConstIteratorStreamer(lexed_streamview);
+  for (auto iter = iter_generator(); !(*iter)->isEOF();
+       iter = iter_generator()) {
+    const verible::TokenInfo &token = **iter;
+    if (token.token_enum() == MacroIdentifier ||
+        token.token_enum() == MacroIdItem ||
+        token.token_enum() == MacroCallId) {
+      const auto *definition = FindOrNull(preprocess_data_.macro_definitions,
+                                          token.text().substr(1));
+      if (!definition) {  // HandleMacroIdentifier reports the error
+        return HandleMacroIdentifier(iter, iter_generator, false);
+      }
+      verible::MacroCall macro_call;
+      MacroDefinition::substitution_map_type call_subs_map;
+      RETURN_IF_ERROR(ConsumeAndParseMacroCall(iter, iter_generator,
+                                               &macro_call, *definition));
+      // The arguments are part of this text, so subs_map applies to them.
+      for (verible::DefaultTokenInfo &argument :
+           macro_call.positional_arguments) {
+        std::string expanded_argument;
+        RETURN_IF_ERROR(
+            AppendExpandedText(argument.text(), subs_map, &expanded_argument));
+        argument.set_text(
+            preprocess_data_.concatenated_token_texts.emplace_back(
+                std::move(expanded_argument)));
+      }
+      if (definition->IsCallable()) {
+        RETURN_IF_ERROR(definition->PopulateSubstitutionMap(
+            macro_call.positional_arguments, &call_subs_map));
+      }
+      RETURN_IF_ERROR(AppendExpandedText(definition->DefinitionText().text(),
+                                         call_subs_map, expanded_text));
+    } else if (const auto *replacement = FindOrNull(subs_map, token.text())) {
+      RETURN_IF_ERROR(
+          AppendExpandedText(replacement->text(), {}, expanded_text));
+    } else if (token.token_enum() != PP_TOKEN_CONCAT) {
+      absl::StrAppend(expanded_text, token.text());
+    }
+  }
+  return absl::OkStatus();
+}
+
+// Expands a `"...`" from a macro body into one string literal token, saved
+// like the result of ExpandText.  A `\`" in it becomes \".
+absl::Status VerilogPreprocess::ExpandEvalStringLiteral(
+    const verible::TokenInfo &eval_string_literal,
+    const MacroDefinition::substitution_map_type &subs_map) {
+  const std::string_view text = eval_string_literal.text();
+  const std::string_view text_between_quotes =
+      text.substr(2, text.size() - 4);  // without `" on each side
+  std::string string_literal = "\"";
+  bool is_first_piece = true;
+  for (const std::string_view piece :
+       absl::StrSplit(text_between_quotes, "`\\`\"")) {
+    if (!is_first_piece) string_literal += "\\\"";
+    is_first_piece = false;
+    RETURN_IF_ERROR(AppendExpandedText(piece, subs_map, &string_literal));
+  }
+  string_literal += '"';
+  preprocess_data_.lexed_macros_backup.push_back({verible::TokenInfo(
+      TK_StringLiteral, preprocess_data_.concatenated_token_texts.emplace_back(
+                            std::move(string_literal)))});
+  return absl::OkStatus();
+}
+
 // This method expands a callable macro call, that follows this form:
 // `MACRO([param1],[param2],...)
 absl::Status VerilogPreprocess::ExpandMacro(
@@ -504,6 +587,12 @@ absl::Status VerilogPreprocess::ExpandMacro(
         last_token.token_enum() == MacroCallId) {
       RETURN_IF_ERROR(HandleMacroIdentifier(iter, iter_generator, false));
       // merge the expanded macro tokens into 'expanded_lexed_sequence'
+      concatenator.Append(last_token,
+                          preprocess_data_.lexed_macros_backup.back());
+      continue;
+    }
+    if (last_token.token_enum() == TK_EvalStringLiteral) {
+      RETURN_IF_ERROR(ExpandEvalStringLiteral(last_token, subs_map));
       concatenator.Append(last_token,
                           preprocess_data_.lexed_macros_backup.back());
       continue;

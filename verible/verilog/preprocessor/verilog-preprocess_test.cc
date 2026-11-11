@@ -903,7 +903,7 @@ module m;
 wire clk_primary;
 wire abc;
 wire clock_primary;
-wire quoted = 32'h0+`"Q`";
+wire quoted = 32'h0+"Q";
 endmodule)"},
 
       {"[** Trailing token concatenation stops at the macro call **]",
@@ -947,6 +947,44 @@ module m;
 BUF BUF_a (.O(x));
 X c (.I(y));
 type_t name;
+endmodule)"},
+
+      {"[** String from `\" with formal parameters, macro calls, `` and `\\`\" "
+       "**]",
+       R"(
+`define HI Hello
+`define GREETING `HI, world
+`define CAT(a, b) a``b
+`define FORMAL_FIRST(x) `"x``Z`"
+`define FORMAL_LAST(x) `"Z``x`"
+`define MESSAGE(x, y) `"x: `\`"y`\`"`"
+`define EMBEDDED `"`GREETING! `CAT(big, cat)`"
+`define FORMAL_IN_CALL(x) `"`CAT(x, 1)`"
+module m;
+string formal_first = `FORMAL_FIRST(Y);
+string formal_last = `FORMAL_LAST(Y);
+string escaped_quote = `MESSAGE(left side, right side);
+string macro_call = `EMBEDDED;
+string macro_argument = `FORMAL_FIRST(`HI);
+string formal_in_call = `FORMAL_IN_CALL(Y);
+endmodule)",
+       // ...equivalent to
+       R"(
+`define HI Hello
+`define GREETING `HI, world
+`define CAT(a, b) a``b
+`define FORMAL_FIRST(x) `"x``Z`"
+`define FORMAL_LAST(x) `"Z``x`"
+`define MESSAGE(x, y) `"x: `\`"y`\`"`"
+`define EMBEDDED `"`GREETING! `CAT(big, cat)`"
+`define FORMAL_IN_CALL(x) `"`CAT(x, 1)`"
+module m;
+string formal_first = "YZ";
+string formal_last = "ZY";
+string escaped_quote = "left side: \"right side\"";
+string macro_call = "Hello, world! bigcat";
+string macro_argument = "HelloZ";
+string formal_in_call = "Y1";
 endmodule)"}
 
   };
@@ -995,6 +1033,20 @@ endmodule)",
   EXPECT_TRUE(std::any_of(stream.begin(), stream.end(), [](const auto &token) {
     return token->text() == "123abc";
   }));
+}
+
+TEST(VerilogPreprocessTest, StringWithUndefinedMacroIsRejected) {
+  PreprocessorTester tester(
+      R"(
+`define QUOTED `"`UNDEFINED`"
+module m;
+string s = `QUOTED;
+endmodule)",
+      VerilogPreprocess::Config({.expand_macros = true}));
+  EXPECT_FALSE(tester.Status().ok());
+  ASSERT_EQ(tester.PreprocessorData().errors.size(), 1);
+  EXPECT_EQ(tester.PreprocessorData().errors.front().token_info.text(),
+            "`UNDEFINED");
 }
 
 TEST(VerilogPreprocessTest, TokenConcatenationRejectedInputs) {

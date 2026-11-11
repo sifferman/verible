@@ -172,8 +172,8 @@ StringContent  ([^\r\n"\\]|{EscapeSequence}|\\{LineTerminator})*
 UnterminatedStringLiteral  \"{StringContent}
 StringLiteral  {UnterminatedStringLiteral}\"
 
-/* Preprocessor-evaluated string literal */
-EvalStringLiteralContent ([^`]|(`[^"]))*
+/* Preprocessor-evaluated string literal, which may contain `\`" */
+EvalStringLiteralContent ([^`]|(`[^"])|(`\\`\"))*
 UnterminatedEvalStringLiteral `\"{EvalStringLiteralContent}
 EvalStringLiteral {UnterminatedEvalStringLiteral}`\"
 

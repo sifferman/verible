@@ -1379,6 +1379,7 @@ static std::initializer_list<SimpleTestData> kEvalStringLiteralTests = {
     {"`\"`abc(d)`\""},    //
     {"`\"`abc(d,e)`\""},  //
     {"`\"```\""},         // token concatenation operator in middle
+    {"`\"`\\`\"`\""},     // escaped quotation mark
 };
 
 // tokens with special handling in lexer

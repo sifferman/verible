@@ -926,6 +926,61 @@ endmodule)"},
        "\n`define TABBED(a, b) a\t``\tb\n"
        "module m;\ntype_t name;\nendmodule\n"},
 
+      {"[** Token concatenation that forms a macro name **]",
+       R"(
+`define NAME clk
+`define NAME_primary main_clock
+`define ab first
+`define a_b second
+`define add(p, q) p + q
+`define CAT(x, y) `x``y
+`define CAT3(x, y) `x``_``y
+`define CALL(x) `x
+`define APPLY(f) `f(29, 1)
+`define PRIMARY(y) `NAME``y
+`define SPACED(y) `NAME`` y
+`define ADD(y) `ad``y(30, 1)
+`define PRIMARY_NAME `NAME``_primary
+`define TRAILING_NAME `NAME``
+module m;
+wire `CAT(a, b);
+wire `CAT3(a, b);
+wire `CALL(ab);
+wire v = `APPLY(add);
+wire `PRIMARY(_primary);
+wire `SPACED(_primary);
+wire w = `ADD(d);
+wire `PRIMARY_NAME;
+wire `TRAILING_NAME;
+endmodule)",
+       // ...equivalent to
+       R"(
+`define NAME clk
+`define NAME_primary main_clock
+`define ab first
+`define a_b second
+`define add(p, q) p + q
+`define CAT(x, y) `x``y
+`define CAT3(x, y) `x``_``y
+`define CALL(x) `x
+`define APPLY(f) `f(29, 1)
+`define PRIMARY(y) `NAME``y
+`define SPACED(y) `NAME`` y
+`define ADD(y) `ad``y(30, 1)
+`define PRIMARY_NAME `NAME``_primary
+`define TRAILING_NAME `NAME``
+module m;
+wire first;
+wire second;
+wire first;
+wire v = 29 + 1;
+wire main_clock;
+wire clk _primary;
+wire w = 30 + 1;
+wire main_clock;
+wire clk;
+endmodule)"},
+
       {"[** Token concatenation with nothing on one side **]",
        R"(
 `define BUFFER(inst, o) BUF BUF_``inst`` (.O(o));

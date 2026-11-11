@@ -19,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -352,6 +353,49 @@ void VerilogPreprocess::RegisterMacroDefinition(
 }
 
 namespace {
+// Returns the macro body with each macro name that is a formal argument or
+// ends in `` replaced by the name it forms: with x=a and y=b, `x``y becomes
+// `ab.  Returns nullopt when the body has no such macro name.
+std::optional<std::string> PasteMacroNames(
+    std::string_view body, const verible::TokenSequence &tokens,
+    const verible::MacroDefinition::substitution_map_type &subs_map) {
+  const auto substitute = [&subs_map](const verible::TokenInfo &token) {
+    return verible::MacroDefinition::SubstituteText(subs_map, token).text();
+  };
+  const auto pastes_token_after = [&tokens](size_t concat_index) {
+    return concat_index + 1 < tokens.size() &&
+           tokens[concat_index].token_enum() == PP_TOKEN_CONCAT;
+  };
+  std::string pasted_body;
+  size_t copied_length = 0;
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    const verible::TokenInfo &macro_name = tokens[i];
+    if (macro_name.token_enum() != MacroIdentifier &&
+        macro_name.token_enum() != MacroCallId) {
+      continue;
+    }
+    const verible::TokenInfo name_without_backtick(macro_name.token_enum(),
+                                                   macro_name.text().substr(1));
+    if (!subs_map.contains(name_without_backtick.text()) &&
+        !pastes_token_after(i + 1)) {
+      continue;
+    }
+    const size_t macro_name_offset = macro_name.text().data() - body.data();
+    absl::StrAppend(
+        &pasted_body,
+        body.substr(copied_length, macro_name_offset - copied_length), "`",
+        substitute(name_without_backtick));
+    for (; pastes_token_after(i + 1); i += 2) {
+      absl::StrAppend(&pasted_body, substitute(tokens[i + 2]));
+    }
+    const std::string_view last_piece = tokens[i].text();
+    copied_length = last_piece.data() + last_piece.size() - body.data();
+  }
+  if (copied_length == 0) return std::nullopt;
+  absl::StrAppend(&pasted_body, body.substr(copied_length));
+  return pasted_body;
+}
+
 // Appends the expansion of each token of a macro body or macro argument.
 // A `` joins the tokens directly before and after it, and the joined text is
 // lexed again.  A `` next to white space joins nothing.
@@ -466,16 +510,25 @@ absl::Status VerilogPreprocess::ExpandMacro(
                                                               &subs_map));
   }
 
-  VerilogLexer lexer(macro_definition->DefinitionText().text());
   verible::TokenSequence lexed_sequence;
   verible::TokenSequence expanded_lexed_sequence;
   // Populating the lexed token sequence.
-  for (lexer.DoNextToken(); !lexer.GetLastToken().isEOF();
-       lexer.DoNextToken()) {
+  const auto lex_body = [&lexed_sequence](std::string_view body) {
+    lexed_sequence.clear();
+    VerilogLexer lexer(body);
+    for (lexer.DoNextToken(); !lexer.GetLastToken().isEOF();
+         lexer.DoNextToken()) {
+      lexed_sequence.push_back(lexer.GetLastToken());
+    }
+    // Retain EOF end sentinel (see ExpandText).
     lexed_sequence.push_back(lexer.GetLastToken());
+  };
+  const std::string_view body = macro_definition->DefinitionText().text();
+  lex_body(body);
+  if (auto pasted_body = PasteMacroNames(body, lexed_sequence, subs_map)) {
+    lex_body(preprocess_data_.concatenated_token_texts.emplace_back(
+        *std::move(pasted_body)));
   }
-  // Retain EOF end sentinel (see ExpandText).
-  lexed_sequence.push_back(lexer.GetLastToken());
   verible::TokenStreamView lexed_streamview;
   // Initializing the lexed token stream view.
   InitTokenStreamView(lexed_sequence, &lexed_streamview);

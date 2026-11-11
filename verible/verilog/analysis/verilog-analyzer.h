@@ -24,6 +24,7 @@
 #include "verible/common/analysis/file-analyzer.h"
 #include "verible/common/strings/mem-block.h"
 #include "verible/common/text/token-stream-view.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/preprocessor/verilog-preprocess.h"
 
 namespace verilog {
@@ -31,11 +32,17 @@ namespace verilog {
 // VerilogAnalyzer analyzes Verilog and SystemVerilog code syntax.
 class VerilogAnalyzer : public verible::FileAnalyzer {
  public:
+  // 'preprocessing_info' gives the +define+ macros; 'file_opener' reads the
+  // files named by `include when preprocess_config.include_files is set.
   VerilogAnalyzer(std::shared_ptr<verible::MemBlock> text,
                   std::string_view name,
-                  const VerilogPreprocess::Config &preprocess_config)
+                  const VerilogPreprocess::Config &preprocess_config,
+                  const FileList::PreprocessingInfo &preprocessing_info = {},
+                  VerilogPreprocess::FileOpener file_opener = nullptr)
       : verible::FileAnalyzer(std::move(text), name),
-        preprocess_config_(preprocess_config) {}
+        preprocess_config_(preprocess_config),
+        preprocessing_info_(preprocessing_info),
+        file_opener_(std::move(file_opener)) {}
 
   // Legacy constructor.
   VerilogAnalyzer(std::string_view text, std::string_view name,
@@ -50,6 +57,8 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
 
   VerilogAnalyzer(const VerilogAnalyzer &) = delete;
   VerilogAnalyzer(VerilogAnalyzer &&) = delete;
+
+  ~VerilogAnalyzer() override;
 
   // Lex-es the input text into tokens.
   absl::Status Tokenize() final;
@@ -73,7 +82,9 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
   // by parser directive comments.
   static std::unique_ptr<VerilogAnalyzer> AnalyzeAutomaticMode(
       const std::shared_ptr<verible::MemBlock> &text, std::string_view name,
-      const VerilogPreprocess::Config &preprocess_config);
+      const VerilogPreprocess::Config &preprocess_config,
+      const FileList::PreprocessingInfo &preprocessing_info = {},
+      const VerilogPreprocess::FileOpener &file_opener = nullptr);
 
   static std::unique_ptr<VerilogAnalyzer> AnalyzeAutomaticMode(
       std::string_view text, std::string_view name,
@@ -82,9 +93,14 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
   // Automatically analyze with correct parsing mode like AnalyzeAutomaticMode()
   // but attempt first with preprocessor disabled to get as complete as
   // possible parse tree; if this yields to syntax errors, fall back to
-  // enabling preprocess branches.
+  // enabling preprocess branches, then to expanding macros.
+  // With a 'file_opener', the attempt that both filters branches and expands
+  // macros also reads the files named by `include.  'file_opener' is not
+  // called after this returns.
   static std::unique_ptr<VerilogAnalyzer> AnalyzeAutomaticPreprocessFallback(
-      std::string_view text, std::string_view name);
+      std::string_view text, std::string_view name,
+      const FileList::PreprocessingInfo &preprocessing_info = {},
+      const VerilogPreprocess::FileOpener &file_opener = nullptr);
 
   const VerilogPreprocessData &PreprocessorData() const {
     return preprocessor_data_;
@@ -124,6 +140,9 @@ class VerilogAnalyzer : public verible::FileAnalyzer {
 
   // Preprocessor.
   const VerilogPreprocess::Config preprocess_config_;
+  // Owns the +define+ text that macro expansions point into.
+  const FileList::PreprocessingInfo preprocessing_info_;
+  const VerilogPreprocess::FileOpener file_opener_;
   VerilogPreprocessData preprocessor_data_;
 
   // Status of lexing.

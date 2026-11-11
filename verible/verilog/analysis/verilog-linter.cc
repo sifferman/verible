@@ -48,12 +48,14 @@
 #include "verible/common/text/token-info.h"
 #include "verible/common/util/file-util.h"
 #include "verible/common/util/logging.h"
+#include "verible/common/util/range.h"
 #include "verible/common/util/status-macros.h"
 #include "verible/verilog/analysis/default-rules.h"
 #include "verible/verilog/analysis/lint-rule-registry.h"
 #include "verible/verilog/analysis/verilog-analyzer.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 #include "verible/verilog/analysis/verilog-linter-constants.h"
+#include "verible/verilog/analysis/verilog-project.h"
 #include "verible/verilog/parser/verilog-token-classifications.h"
 #include "verible/verilog/parser/verilog-token-enum.h"
 
@@ -104,7 +106,8 @@ std::set<LintViolationWithStatus> GetSortedViolations(
 int LintOneFile(std::ostream *stream, std::string_view filename,
                 const LinterConfiguration &config,
                 verible::ViolationHandler *violation_handler, bool check_syntax,
-                bool parse_fatal, bool lint_fatal, bool show_context) {
+                bool parse_fatal, bool lint_fatal, bool show_context,
+                const FileList::PreprocessingInfo &preprocessing_info) {
   const absl::StatusOr<std::string> content_or =
       verible::file::GetContentAsString(filename);
   if (!content_or.ok()) {
@@ -120,8 +123,16 @@ int LintOneFile(std::ostream *stream, std::string_view filename,
   // TODO(hzeller): this behavior could be configurable, but then again this
   //   is something the user is expecting to work as best as possible (which
   //   is also why we use automatic mode).
+  // A quoted `include names a file in the current directory or in one of the
+  // +incdir+ directories (IEEE 1800-2023 section 22.4).
+  std::vector<std::string> include_dirs = {"."};
+  include_dirs.insert(include_dirs.end(),
+                      preprocessing_info.include_dirs.begin(),
+                      preprocessing_info.include_dirs.end());
+  VerilogProject include_project(".", include_dirs);
   const auto analyzer = VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
-      *content_or, filename);
+      *content_or, filename, preprocessing_info,
+      include_project.MakeIncludedFileOpener());
   if (check_syntax) {
     const auto lex_status = ABSL_DIE_IF_NULL(analyzer)->LexStatus();
     const auto parse_status = analyzer->ParseStatus();
@@ -257,6 +268,13 @@ static void AppendLintRuleStatuses(
     std::vector<LintRuleStatus> *cumulative_statuses) {
   for (const auto &status : new_statuses) {
     cumulative_statuses->push_back(status);
+    // A violation in text from an `include belongs to the included file.
+    cumulative_statuses->back().WaiveViolations(
+        [&](const verible::LintViolation &violation) {
+          const std::string_view violation_text = violation.token.text();
+          return !violation_text.empty() &&
+                 !verible::IsSubRange(violation_text, text_base);
+        });
     const auto *waived_lines =
         waivers.LookupLineNumberSet(status.lint_rule_name);
     if (waived_lines) {

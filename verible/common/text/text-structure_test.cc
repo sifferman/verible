@@ -247,6 +247,15 @@ TEST_F(TokenRangeTest, GetRangeForTokenOrText) {
   }
 }
 
+TEST(TextStructureViewTest, GetRangeForTokenBeforeContentsGivesEof) {
+  constexpr std::string_view kSurroundingText = "before\nline one\nline two";
+  const TextStructureView view(kSurroundingText.substr(7));
+  const TokenInfo token_before_contents(1, kSurroundingText.substr(0, 6));
+  const LineColumn end_of_contents{1, 8};
+  EXPECT_EQ(view.GetRangeForToken(token_before_contents),
+            (LineColumnRange{end_of_contents, end_of_contents}));
+}
+
 TEST_F(TokenRangeTest, CheckContainsText) {
   const TokenInfo &token = data_.FindTokenAt({0, 7});
   const std::string_view other_string = "other_string";

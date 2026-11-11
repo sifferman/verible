@@ -31,6 +31,7 @@
 #include "verible/common/strings/string-memory-map.h"
 #include "verible/common/text/text-structure.h"
 #include "verible/verilog/analysis/verilog-analyzer.h"
+#include "verible/verilog/preprocessor/verilog-preprocess.h"
 
 namespace verilog {
 
@@ -290,6 +291,10 @@ class VerilogProject {
   // If the file was previously opened, that data is returned.
   absl::StatusOr<VerilogSourceFile *> OpenIncludedFile(
       std::string_view referenced_filename);
+
+  // Returns a file opener for VerilogPreprocess that reads `included files
+  // with OpenIncludedFile().  This project must outlive every call to it.
+  VerilogPreprocess::FileOpener MakeIncludedFileOpener();
 
   // Adds an already opened file by directly passing its content.
   // This is needed in external kythe backends.

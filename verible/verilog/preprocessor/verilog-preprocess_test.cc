@@ -24,6 +24,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "verible/common/text/macro-definition.h"
@@ -1235,6 +1236,88 @@ TEST(VerilogPreprocessTest,
   const auto &error = tester_pp_data.errors.front();
   EXPECT_TRUE(absl::StrContains(error.error_message, "not in any of"))
       << error.error_message;
+}
+
+// Preprocesses 'source' with branch filtering, macro expansion and `include
+// of the files in 'included_files' (name to content).  Returns the text of
+// the significant output tokens, separated by spaces, followed by the error
+// messages.
+static std::string PreprocessWithIncludedFiles(
+    std::string_view source,
+    const std::map<std::string_view, std::string_view> &included_files) {
+  const FileOpener file_opener =
+      [&included_files](
+          std::string_view filename) -> absl::StatusOr<std::string_view> {
+    const auto *content = FindOrNull(included_files, filename);
+    if (content == nullptr) return absl::NotFoundError(filename);
+    return *content;
+  };
+  VerilogPreprocess preprocessor(
+      {.filter_branches = true, .include_files = true, .expand_macros = true},
+      file_opener);
+  LexerTester source_lexer(source);
+  const VerilogPreprocessData preprocessed =
+      preprocessor.ScanStream(source_lexer.GetTokenStreamView());
+  std::vector<std::string_view> output_texts;
+  for (const auto &token : preprocessed.preprocessed_token_stream) {
+    if (VerilogLexer::KeepSyntaxTreeTokens(*token)) {
+      output_texts.push_back(token->text());
+    }
+  }
+  std::string result = absl::StrJoin(output_texts, " ");
+  for (const auto &error : preprocessed.errors) {
+    absl::StrAppend(&result, "\nerror at ", error.token_info.text(), ": ",
+                    error.error_message);
+  }
+  return result;
+}
+
+TEST(VerilogPreprocessTest, MacrosOfIncludedFileAreVisibleAfterInclude) {
+  constexpr std::string_view kGuardedHeader =
+      "`ifndef GUARD\n`define GUARD\n`define WIDTH 8\n`endif\n";
+  EXPECT_EQ(PreprocessWithIncludedFiles("`include \"guarded.svh\"\n"
+                                        "`include \"guarded.svh\"\n"
+                                        "wire [`WIDTH-1:0] w;\n",
+                                        {{"guarded.svh", kGuardedHeader}}),
+            "`define GUARD  `define WIDTH 8 wire [ 8 - 1 : 0 ] w ;");
+}
+
+TEST(VerilogPreprocessTest, MacroDefinedAndUsedInIncludedFile) {
+  EXPECT_EQ(
+      PreprocessWithIncludedFiles(
+          "`include \"define_and_use.svh\"\n",
+          {{"define_and_use.svh", "`define GAP 0\nlocalparam p = `GAP;"}}),
+      "`define GAP 0 localparam p = 0 ;");
+}
+
+TEST(VerilogPreprocessTest, ErrorInIncludedFileIsReportedAtInclude) {
+  EXPECT_EQ(PreprocessWithIncludedFiles("wire w;\n`include \"broken.svh\"\n",
+                                        {{"broken.svh", "wire v;\n`ifdef\n"}}),
+            "wire w ;\nerror at `include: broken.svh:3:1: "
+            "unexpected EOF where expecting macro name");
+}
+
+TEST(VerilogPreprocessTest, UnselectedBranchIsNotExpandedOrIncluded) {
+  EXPECT_EQ(PreprocessWithIncludedFiles("`define ONE 1\n"
+                                        "`ifdef SYNTHESIS\n"
+                                        "`include \"missing.svh\"\n"
+                                        "wire w = `ONE;\n"
+                                        "`endif\n",
+                                        {}),
+            "`define ONE 1");
+}
+
+TEST(VerilogPreprocessTest, KeepUndefinedMacroCalls) {
+  PreprocessorTester tester(
+      "`UNDEFINED(a)\n",
+      VerilogPreprocess::Config(
+          {.expand_macros = true, .keep_undefined_macro_calls = true}));
+  EXPECT_PARSE_OK();
+  std::vector<std::string_view> output_texts;
+  for (const auto &token : tester.Data().GetTokenStreamView()) {
+    output_texts.push_back(token->text());
+  }
+  EXPECT_THAT(output_texts, ElementsAre("`UNDEFINED", "(", "a", ")", ""));
 }
 
 // Regression: a callable-macro invocation truncated at end-of-stream (no '(',

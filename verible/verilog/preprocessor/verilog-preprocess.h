@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // VerilogPreprocess is a *pseudo*-preprocessor for Verilog.
-// Unlike a conventional preprocessor, this pseudo-preprocessor does not open
-// included files, nor does it evaluate preprocessor expressions.
+// Unlike a conventional preprocessor, this pseudo-preprocessor opens included
+// files only with Config::include_files, and does not evaluate preprocessor
+// expressions.
 // Instead, it does a best-effort handling of preprocessor directives
 // locally within one file, and no additional context.
 // For example, it may expand a macro call if its definition happens to be
@@ -118,6 +119,11 @@ class VerilogPreprocess {
 
     // Expand macro definition bodies, this will relexes the macro body.
     bool expand_macros = false;
+
+    // With expand_macros, pass a call to a macro that has no definition
+    // through unexpanded, as if expand_macros were off, instead of reporting
+    // an error.
+    bool keep_undefined_macro_calls = false;
     // TODO(hzeller): Provide a map of command-line provided +define+'s
   };
 
@@ -138,6 +144,8 @@ class VerilogPreprocess {
   // TODO(b/111544845): ExpandEvalStringLiteral
 
   // Sets the preprocessing information containing defines and incdirs.
+  // The macros defined here refer to the text of 'preprocess_info', so it
+  // must outlive every token this preprocessor produces.
   void setPreprocessingInfo(
       const verilog::FileList::PreprocessingInfo &preprocess_info);
 
@@ -250,9 +258,6 @@ class VerilogPreprocess {
 
   // Results of preprocessing
   VerilogPreprocessData preprocess_data_;
-
-  // Defines and incdirs Information passed externally.
-  FileList::PreprocessingInfo preprocess_info_;
 
   // A pointer to a file opener function.
   // This is needed for opening new files while handling includes.

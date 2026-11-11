@@ -7,7 +7,9 @@ freshness: { owner: 'hzeller' reviewed: '2021-09-23' }
 The `verible-verilog-lint` SV style linter analyzes code for patterns and
 constructs that are deemed undesirable according to the implemented lint rules.
 Ideally, each lint rule should reference a passage from an authoritative style
-guide. The style linter operates on *single unpreprocessed files* in isolation.
+guide. The style linter operates on single files in isolation, and preprocesses
+them only when they do not parse otherwise (see
+[Preprocessing](#preprocessing)).
 
 For automatic code-reviews on github, there is a [easy to integrate github
 action available][github-lint-action].
@@ -38,7 +40,7 @@ Currrent limitations:
 ## Usage
 
 ```
-usage: verible-verilog-lint [options] <file> [<file>...]
+usage: verible-verilog-lint [options] [+incdir+<dir>] [+define+<name>[=<value>]] <file> [<file>...]
 
   Flags from external/com_google_absl/absl/flags/parse.cc:
     --flagfile (comma-separated list of files to load flags from); default: ;
@@ -91,6 +93,28 @@ usage: verible-verilog-lint [options] <file> [<file>...]
 
 We recommend each project maintain its own configuration file for convenience
 and consistency among project members.
+
+### Preprocessing
+
+The linter first parses a file without preprocessing it. Only if that fails
+does it filter `` `ifdef `` branches, and then expand macros. When it expands
+macros, it also reads the files named by `` `include ``, so that macros defined
+there are known. A call to a macro that is not defined anywhere stays
+unexpanded.
+
+*   `+incdir+<dir>`: search `<dir>` for `` `include `` files, after the current
+    directory. Repeat it for more directories.
+*   `+define+<name>[=<value>]`: define the macro `<name>`, as `` `define ``
+    would. Repeat it for more macros.
+
+For example:
+
+```
+verible-verilog-lint +incdir+bsg_misc bsg_misc/bsg_counter_up_down.sv
+```
+
+Lint violations in included files are not reported; lint those files on their
+own.
 
 ## Diagnostics
 

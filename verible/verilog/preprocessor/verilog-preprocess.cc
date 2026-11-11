@@ -19,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -307,7 +308,7 @@ absl::Status VerilogPreprocess::HandleMacroIdentifier(
   const std::string_view sv = (*iter)->text();
   const auto *found =
       FindOrNull(preprocess_data_.macro_definitions, sv.substr(1));
-  if (!found) {
+  if (!found && !config_.keep_undefined_macro_calls) {
     preprocess_data_.errors.emplace_back(
         **iter,
         "Error expanding macro identifier, might not be defined before.");
@@ -315,7 +316,9 @@ absl::Status VerilogPreprocess::HandleMacroIdentifier(
         "Error expanding macro identifier, might not be defined before.");
   }
 
-  if (config_.expand_macros) {
+  if (!found) {
+    preprocess_data_.lexed_macros_backup.push_back({**iter});
+  } else {
     verible::MacroCall macro_call;
     absl::Status call_status =
         ConsumeAndParseMacroCall(iter, generator, &macro_call, *found);
@@ -698,13 +701,13 @@ absl::Status VerilogPreprocess::HandleInclude(
   }
   const std::string_view source_contents = *status_or_file;
 
-  // Creating a new "VerilogPreprocess" object for the included file,
-  // With the same configuration and preprocessing info (defines, incdirs) as
-  // the main one.
   // TODO(karimtera): Ideally modify the FileOpener to return
   // absl::StatusOr<MemBlock> to avoid doing a second copy inside TextStructure.
+  // The included text sees the macros defined so far, and the including text
+  // sees the macros that the included text defines or undefines.
   verilog::VerilogPreprocess child_preprocessor(config_, file_opener_);
-  child_preprocessor.setPreprocessingInfo(preprocess_info_);
+  child_preprocessor.preprocess_data_.macro_definitions =
+      std::move(preprocess_data_.macro_definitions);
 
   // TODO(karimtera): limit number of nested includes, detect cycles? maybe.
   preprocess_data_.included_text_structure.emplace_back(
@@ -731,20 +734,33 @@ absl::Status VerilogPreprocess::HandleInclude(
   InitTokenStreamView(included_sequence, &lexed_streamview);
   verilog::VerilogPreprocessData child_preprocessed_data =
       child_preprocessor.ScanStream(lexed_streamview);
+  preprocess_data_.macro_definitions =
+      std::move(child_preprocessed_data.macro_definitions);
 
-  // Check for errors while preprocessing the included file.
+  // Report errors at the `include, as their tokens are not in this file.
   if (!child_preprocessed_data.errors.empty()) {
-    preprocess_data_.errors.insert(preprocess_data_.errors.end(),
-                                   child_preprocessed_data.errors.begin(),
-                                   child_preprocessed_data.errors.end());
+    for (const auto &child_error : child_preprocessed_data.errors) {
+      std::ostringstream message;
+      message << file_path.string() << ':';
+      if (included_structure.Data().ContainsText(
+              child_error.token_info.text())) {
+        message << included_structure.Data().GetRangeForToken(
+            child_error.token_info);
+      }
+      message << ' ' << child_error.error_message;
+      preprocess_data_.errors.emplace_back(**iter, message.str());
+    }
     return absl::InvalidArgumentError(
         "Error: the included file preprocessing has failed.");
   }
 
-  // Need to move the text structures of the child preprocessor to avoid
-  // destruction.
+  // Keep the text and the expanded macros of the included file alive, as the
+  // forwarded tokens point into them.
   for (auto &u : child_preprocessed_data.included_text_structure) {
     preprocess_data_.included_text_structure.push_back(std::move(u));
+  }
+  for (auto &u : child_preprocessed_data.lexed_macros_backup) {
+    preprocess_data_.lexed_macros_backup.push_back(std::move(u));
   }
 
   // Forwarding the included preprocessed view.  The EOF end sentinel appended
@@ -780,6 +796,10 @@ absl::Status VerilogPreprocess::HandleTokenIterator(
     default:
       break;  // not interested in anything else
   }
+  if (!conditional_block_.top().InSelectedBranch()) {
+    return absl::OkStatus();
+  }
+
   if (config_.expand_macros && ((*iter)->token_enum() == MacroIdentifier ||
                                 (*iter)->token_enum() == MacroIdItem ||
                                 (*iter)->token_enum() == MacroCallId)) {
@@ -790,20 +810,15 @@ absl::Status VerilogPreprocess::HandleTokenIterator(
     return HandleInclude(iter, generator);
   }
 
-  // If not return'ed above, any other tokens are passed through unmodified
-  // unless filtered by a branch.
-  if (conditional_block_.top().InSelectedBranch()) {
-    preprocess_data_.preprocessed_token_stream.push_back(*iter);
-  }
+  // If not return'ed above, any other tokens are passed through unmodified.
+  preprocess_data_.preprocessed_token_stream.push_back(*iter);
   return absl::OkStatus();
 }
 
 void VerilogPreprocess::setPreprocessingInfo(
     const verilog::FileList::PreprocessingInfo &preprocess_info) {
-  preprocess_info_ = preprocess_info;
-
   // Adding defines.
-  for (const auto &define : preprocess_info_.defines) {
+  for (const auto &define : preprocess_info.defines) {
     // manually create the tokens to save them into a MacroDefinition.
     verible::TokenInfo macro_directive(PP_define, "`define");
     verible::TokenInfo macro_name(PP_Identifier, define.name);
@@ -814,8 +829,6 @@ void VerilogPreprocess::setPreprocessingInfo(
     // Registers the macro definition to memeory.
     RegisterMacroDefinition(macro_definition);
   }
-
-  // We can directly access "preprocess_info_.include_dirs" whenever needed.
 }
 
 VerilogPreprocessData VerilogPreprocess::ScanStream(

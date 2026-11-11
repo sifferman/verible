@@ -39,6 +39,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "verible/common/analysis/lint-rule-status.h"
@@ -47,6 +48,7 @@
 #include "verible/common/util/logging.h"
 #include "verible/verilog/analysis/default-rules.h"
 #include "verible/verilog/analysis/verilog-analyzer.h"
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 
 namespace verilog {
@@ -190,6 +192,71 @@ TEST_F(LintOneFileTest, LintError) {
       EXPECT_FALSE(output.str().empty());
     }
   }
+}
+
+TEST_F(LintOneFileTest, IncludeFromIncludeDirectory) {
+  const std::string include_dir =
+      verible::file::JoinPath(testing::TempDir(), "lint_include_dir");
+  ASSERT_TRUE(verible::file::CreateDir(include_dir).ok());
+  // The localparam lacks a storage type, a lint violation of the header.
+  const ScopedTestFile header(include_dir,
+                              "`define CLASS_HEADER(name) class name;\n"
+                              "localparam lacks_storage_type = 0;\n",
+                              "class_header.svh");
+  const ScopedTestFile source(testing::TempDir(),
+                              "`include \"class_header.svh\"\n"
+                              "`CLASS_HEADER(foo)\n"
+                              "  `UNDEFINED_MACRO(1)\n"
+                              "endclass : foo\n");
+  FileList::PreprocessingInfo preprocessing_info;
+  {  // without the include directory
+    std::ostringstream output;
+    ViolationPrinter violation_printer(&output);
+    const int exit_code =
+        LintOneFile(&output, source.filename(), config_, &violation_printer,
+                    true, true, true, false, preprocessing_info);
+    EXPECT_EQ(exit_code, 1);
+    EXPECT_THAT(output.str(), testing::HasSubstr("class_header.svh"));
+  }
+  preprocessing_info.include_dirs.push_back(include_dir);
+  {  // with the include directory
+    std::ostringstream output;
+    ViolationPrinter violation_printer(&output);
+    const int exit_code =
+        LintOneFile(&output, source.filename(), config_, &violation_printer,
+                    true, true, true, false, preprocessing_info);
+    EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
+    EXPECT_TRUE(output.str().empty()) << output.str();
+  }
+}
+
+TEST_F(LintOneFileTest, IncludeByAbsolutePath) {
+  const ScopedTestFile header(testing::TempDir(),
+                              "`define CLASS_HEADER(name) class name;\n");
+  const ScopedTestFile source(testing::TempDir(),
+                              absl::StrCat("`include \"", header.filename(),
+                                           "\"\n`CLASS_HEADER(foo)\n"
+                                           "endclass : foo\n"));
+  std::ostringstream output;
+  ViolationPrinter violation_printer(&output);
+  const int exit_code =
+      LintOneFile(&output, source.filename(), config_, &violation_printer, true,
+                  true, true, false);
+  EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
+}
+
+TEST_F(LintOneFileTest, DefineFromCommandLine) {
+  const ScopedTestFile source(testing::TempDir(),
+                              "`CLASS_KEYWORD foo;\nendclass : foo\n");
+  FileList::PreprocessingInfo preprocessing_info;
+  preprocessing_info.defines.emplace_back("CLASS_KEYWORD", "class");
+  std::ostringstream output;
+  ViolationPrinter violation_printer(&output);
+  const int exit_code =
+      LintOneFile(&output, source.filename(), config_, &violation_printer, true,
+                  true, true, false, preprocessing_info);
+  EXPECT_EQ(exit_code, 0) << "output:\n" << output.str();
+  EXPECT_TRUE(output.str().empty()) << output.str();
 }
 
 class VerilogLinterTest : public DefaultLinterConfigTestFixture,

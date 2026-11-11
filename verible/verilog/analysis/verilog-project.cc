@@ -351,6 +351,14 @@ absl::StatusOr<VerilogSourceFile *> VerilogProject::OpenIncludedFile(
   return inserted.first->second->Status();
 }
 
+VerilogPreprocess::FileOpener VerilogProject::MakeIncludedFileOpener() {
+  return [this](std::string_view filename) -> absl::StatusOr<std::string_view> {
+    const auto included_file = OpenIncludedFile(filename);
+    if (!included_file.ok()) return included_file.status();
+    return (*included_file)->GetContent();
+  };
+}
+
 void VerilogProject::AddVirtualFile(std::string_view resolved_filename,
                                     std::string_view content) {
   const auto inserted = files_.emplace(

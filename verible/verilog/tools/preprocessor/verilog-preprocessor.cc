@@ -37,7 +37,6 @@
 
 using verible::SubcommandArgsRange;
 using verible::SubcommandEntry;
-using FileOpener = verilog::VerilogPreprocess::FileOpener;
 
 // TODO(karimtera): Add a boolean flag to configure the macro expansion.
 ABSL_FLAG(int, limit_variants, 20, "Maximum number of variants printed");
@@ -101,14 +100,8 @@ static absl::Status PreprocessSingleFile(
 
   verilog::VerilogProject project(".", preprocessing_info.include_dirs);
 
-  FileOpener file_opener =
-      [&project](
-          std::string_view filename) -> absl::StatusOr<std::string_view> {
-    auto result = project.OpenIncludedFile(filename);
-    if (!result.status().ok()) return result.status();
-    return (*result)->GetContent();
-  };
-  verilog::VerilogPreprocess preprocessor(config, file_opener);
+  verilog::VerilogPreprocess preprocessor(config,
+                                          project.MakeIncludedFileOpener());
 
   // Setting the preprocessing info (defines, and incdirs) in the preprocessor.
   preprocessor.setPreprocessingInfo(preprocessing_info);

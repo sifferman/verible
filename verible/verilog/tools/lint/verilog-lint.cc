@@ -34,8 +34,8 @@
 #include "verible/common/analysis/violation-handler.h"
 #include "verible/common/util/enum-flags.h"
 #include "verible/common/util/init-command-line.h"
-#include "verible/common/util/iterator-range.h"
 #include "verible/common/util/logging.h"  // for operator<<, LOG, LogMessage, etc
+#include "verible/verilog/analysis/verilog-filelist.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 #include "verible/verilog/analysis/verilog-linter.h"
 
@@ -118,7 +118,9 @@ static const int kAutofixErrorExitStatus = 3;
 
 int main(int argc, char **argv) {
   const auto usage =
-      absl::StrCat("usage: ", argv[0], " [options] <file> [<file>...]");
+      absl::StrCat("usage: ", argv[0],
+                   " [options] [+incdir+<dir>] [+define+<name>[=<value>]] "
+                   "<file> [<file>...]");
   const auto args = verible::InitCommandLine(usage, &argc, &argv);
 
   std::string help_flag = absl::GetFlag(FLAGS_help_rules);
@@ -216,9 +218,16 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  // All positional arguments are file names.  Exclude program name.
-  for (const std::string_view filename :
-       verible::make_range(args.begin() + 1, args.end())) {
+  // Positional arguments are file names, +incdir+<dir> and
+  // +define+<name>[=<value>].  Exclude program name.
+  verilog::FileList file_list;
+  if (const absl::Status status = verilog::AppendFileListFromCommandline(
+          {args.begin() + 1, args.end()}, &file_list);
+      !status.ok()) {
+    std::cerr << status.message() << std::endl;
+    return 1;
+  }
+  for (const std::string_view filename : file_list.file_paths) {
     // Copy configuration, so that it can be locally modified per file.
     auto config_status = verilog::LinterConfigurationFromFlags(filename);
     if (!config_status.ok()) {
@@ -232,7 +241,7 @@ int main(int argc, char **argv) {
         &std::cout, filename, config, violation_handler.get(),
         absl::GetFlag(FLAGS_check_syntax), absl::GetFlag(FLAGS_parse_fatal),
         absl::GetFlag(FLAGS_lint_fatal),
-        absl::GetFlag(FLAGS_show_diagnostic_context));
+        absl::GetFlag(FLAGS_show_diagnostic_context), file_list.preprocessing);
     exit_status = std::max(lint_status, exit_status);
   }  // for each file
 

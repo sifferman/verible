@@ -56,6 +56,15 @@ using verible::TokenInfo;
 using verible::TokenSequence;
 using verible::container::InsertKeyOrDie;
 
+VerilogAnalyzer::~VerilogAnalyzer() {
+  // After expanding macros, the token stream view and the syntax tree can
+  // point into text that preprocessor_data_ owns, such as included files,
+  // which fails the consistency check in the destructor of Data().
+  if (!preprocess_config_.expand_macros || text_structure_ == nullptr) return;
+  MutableData().MutableTokenStreamView().clear();
+  MutableData().MutableSyntaxTree() = nullptr;
+}
+
 absl::Status VerilogAnalyzer::Tokenize() {
   if (!tokenized_) {
     VerilogLexer lexer{Data().Contents()};
@@ -130,10 +139,12 @@ static std::string_view FailingTokenKeywordToParsingMode(
 
 std::unique_ptr<VerilogAnalyzer> VerilogAnalyzer::AnalyzeAutomaticMode(
     const std::shared_ptr<verible::MemBlock> &text, std::string_view name,
-    const VerilogPreprocess::Config &preprocess_config) {
+    const VerilogPreprocess::Config &preprocess_config,
+    const FileList::PreprocessingInfo &preprocessing_info,
+    const VerilogPreprocess::FileOpener &file_opener) {
   VLOG(2) << __FUNCTION__;
-  auto analyzer =
-      std::make_unique<VerilogAnalyzer>(text, name, preprocess_config);
+  auto analyzer = std::make_unique<VerilogAnalyzer>(
+      text, name, preprocess_config, preprocessing_info, file_opener);
   if (analyzer == nullptr) return analyzer;
   const std::string_view text_base = analyzer->Data().Contents();
   // If there is any lexical error, stop right away.
@@ -211,16 +222,25 @@ std::unique_ptr<VerilogAnalyzer> VerilogAnalyzer::AnalyzeAutomaticMode(
 }
 
 std::unique_ptr<VerilogAnalyzer>
-VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(std::string_view text,
-                                                    std::string_view name) {
+VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
+    std::string_view text, std::string_view name,
+    const FileList::PreprocessingInfo &preprocessing_info,
+    const VerilogPreprocess::FileOpener &file_opener) {
+  const auto text_block = std::make_shared<verible::StringMemBlock>(text);
   std::unique_ptr<verilog::VerilogAnalyzer> parser;
   for (bool preprocess_expand_macros : {false, true}) {
     bool expand_macro_status = false;
     for (bool preprocess_filter_branches : {false, true}) {
+      // Without filtered branches, include guards do not stop recursion.
+      const bool include_files =
+          file_opener && preprocess_filter_branches && preprocess_expand_macros;
       parser = verilog::VerilogAnalyzer::AnalyzeAutomaticMode(
-          text, name,
+          text_block, name,
           {.filter_branches = preprocess_filter_branches,
-           .expand_macros = preprocess_expand_macros});
+           .include_files = include_files,
+           .expand_macros = preprocess_expand_macros,
+           .keep_undefined_macro_calls = true},
+          preprocessing_info, file_opener);
       if (parser && parser->LexStatus().ok() && parser->ParseStatus().ok()) {
         expand_macro_status = true;
         break;
@@ -258,7 +278,8 @@ absl::Status VerilogAnalyzer::Analyze() {
   // pseudo-preprocess token stream.
   //   Not all analyses will want to preprocess.
   {
-    VerilogPreprocess preprocessor(preprocess_config_);
+    VerilogPreprocess preprocessor(preprocess_config_, file_opener_);
+    preprocessor.setPreprocessingInfo(preprocessing_info_);
     preprocessor_data_ = preprocessor.ScanStream(Data().GetTokenStreamView());
     if (!preprocessor_data_.errors.empty()) {
       for (const auto &error : preprocessor_data_.errors) {
@@ -287,6 +308,8 @@ absl::Status VerilogAnalyzer::Analyze() {
     MutableData().MutableTokenStreamView() =
         preprocessor_data_.preprocessed_token_stream;  // copy
     // TODO(fangism): could we just move, swap, or directly reference?
+    // Expanded macros and included files bring back whitespace and comments.
+    FilterTokensForSyntaxTree();
   }
 
   auto generator = MakeTokenViewer(Data().GetTokenStreamView());
@@ -295,8 +318,11 @@ absl::Status VerilogAnalyzer::Analyze() {
   // Here would be appropriate for analyzing the syntax tree.
   max_used_stack_size_ = parser.MaxUsedStackSize();
 
-  // Expand macro arguments that are parseable as expressions.
-  if (parse_status_.ok() && Data().SyntaxTree() != nullptr) {
+  // Expand macro arguments that are parseable as expressions.  This rebuilds
+  // the token sequence of this file, which only works while the token stream
+  // view points into it, so not after expanding macros.
+  if (parse_status_.ok() && Data().SyntaxTree() != nullptr &&
+      !preprocess_config_.expand_macros) {
     ExpandMacroCallArgExpressions();
   }
 

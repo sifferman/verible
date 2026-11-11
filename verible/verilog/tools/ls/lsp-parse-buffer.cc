@@ -28,10 +28,12 @@
 #include "verible/common/analysis/lint-rule-status.h"
 #include "verible/common/lsp/lsp-file-utils.h"
 #include "verible/common/lsp/lsp-text-buffer.h"
+#include "verible/common/util/file-util.h"
 #include "verible/common/util/logging.h"
 #include "verible/verilog/analysis/verilog-analyzer.h"
 #include "verible/verilog/analysis/verilog-linter-configuration.h"
 #include "verible/verilog/analysis/verilog-linter.h"
+#include "verible/verilog/analysis/verilog-project.h"
 
 namespace verilog {
 static absl::StatusOr<std::vector<verible::LintRuleStatus>> RunLinter(
@@ -50,12 +52,21 @@ static absl::StatusOr<std::vector<verible::LintRuleStatus>> RunLinter(
   return VerilogLintTextStructure(filename, config, text_structure);
 }
 
+// Reads `included files from the directory of the file at 'uri'.
+static std::unique_ptr<VerilogAnalyzer> AnalyzeWithIncludesNextToFile(
+    std::string_view uri, std::string_view content) {
+  const std::string file_path = verible::lsp::LSPUriToPath(uri);
+  VerilogProject include_project(
+      ".", {std::string(verible::file::Dirname(file_path))});
+  return VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
+      content, uri, {}, include_project.MakeIncludedFileOpener());
+}
+
 ParsedBuffer::ParsedBuffer(int64_t version, std::string_view uri,
                            std::string_view content)
     : version_(version),
       uri_(uri),
-      parser_(verilog::VerilogAnalyzer::AnalyzeAutomaticPreprocessFallback(
-          content, uri)) {
+      parser_(AnalyzeWithIncludesNextToFile(uri, content)) {
   VLOG(1) << "Analyzed " << uri << " lex:" << parser_->LexStatus()
           << "; parser:" << parser_->ParseStatus() << std::endl;
   // TODO(hzeller): should we use a filename not URI ?

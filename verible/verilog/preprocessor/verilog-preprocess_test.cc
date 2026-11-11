@@ -1290,6 +1290,14 @@ TEST(VerilogPreprocessTest, MacroDefinedAndUsedInIncludedFile) {
       "`define GAP 0 localparam p = 0 ;");
 }
 
+TEST(VerilogPreprocessTest, ConcatenationInIncludedFile) {
+  EXPECT_EQ(PreprocessWithIncludedFiles(
+                "`include \"concatenate.svh\"\n",
+                {{"concatenate.svh",
+                  "`define NAME(prefix) prefix``_suffix\nwire `NAME(a);"}}),
+            "`define NAME ( prefix ) prefix``_suffix wire a_suffix ;");
+}
+
 TEST(VerilogPreprocessTest, ErrorInIncludedFileIsReportedAtInclude) {
   EXPECT_EQ(PreprocessWithIncludedFiles("wire w;\n`include \"broken.svh\"\n",
                                         {{"broken.svh", "wire v;\n`ifdef\n"}}),

@@ -708,6 +708,9 @@ absl::Status VerilogPreprocess::HandleInclude(
   verilog::VerilogPreprocess child_preprocessor(config_, file_opener_);
   child_preprocessor.preprocess_data_.macro_definitions =
       std::move(preprocess_data_.macro_definitions);
+  // Moving the whole deque keeps each joined text at its address.
+  child_preprocessor.preprocess_data_.concatenated_token_texts =
+      std::move(preprocess_data_.concatenated_token_texts);
 
   // TODO(karimtera): limit number of nested includes, detect cycles? maybe.
   preprocess_data_.included_text_structure.emplace_back(
@@ -736,6 +739,8 @@ absl::Status VerilogPreprocess::HandleInclude(
       child_preprocessor.ScanStream(lexed_streamview);
   preprocess_data_.macro_definitions =
       std::move(child_preprocessed_data.macro_definitions);
+  preprocess_data_.concatenated_token_texts =
+      std::move(child_preprocessed_data.concatenated_token_texts);
 
   // Report errors at the `include, as their tokens are not in this file.
   if (!child_preprocessed_data.errors.empty()) {
